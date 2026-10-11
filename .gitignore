@@ -1,0 +1,9 @@
+node_modules/
+dist/
+target/
+**/target/
+src-tauri/gen/
+public/excalidraw/
+.DS_Store
+*.log
+.env*
