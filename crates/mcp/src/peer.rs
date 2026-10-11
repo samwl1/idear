@@ -53,7 +53,17 @@ pub struct Peer {
     _lock: File,
 }
 
+/// The start of the error when another copy holds the data folder.
+pub const BUSY: &str = "Another copy of Claude's idear connection is already using";
+
 impl Peer {
+    /// Whether another copy of `idear mcp` holds this data folder right now.
+    /// A check, not a reservation: `open` can still lose a race.
+    pub fn busy(dir: &Path) -> bool {
+        let Ok(lock) = File::create(dir.join("lock")) else { return false };
+        lock.try_lock().is_err()
+    }
+
     pub fn open(dir: &Path) -> Res<Self> {
         // Each data folder is its own Claude, with its own keys: two copies
         // must never sign as the same device, or their histories would fork.
@@ -74,10 +84,7 @@ impl Peer {
         std::fs::create_dir_all(dir.join("workspaces")).map_err(err)?;
         let lock = File::create(dir.join("lock")).map_err(err)?;
         if lock.try_lock().is_err() {
-            return Err(format!(
-                "Another copy of Claude's idear connection is already using {}. Only one can run at a time; close the other first.",
-                dir.display()
-            ));
+            return Err(format!("{BUSY} {}. Only one can run at a time; close the other first.", dir.display()));
         }
         let host = keychain::default_device_name();
         let mut account = Account::with_user(dir.join("identity.json"), &device, user, &host)?;

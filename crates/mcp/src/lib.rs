@@ -9,7 +9,8 @@
 //! page cuts it off.
 //!
 //! ```text
-//! idear mcp                   serve MCP over stdio (what Claude runs)
+//! idear mcp                   serve MCP over stdio (what Claude runs);
+//!                             extra copies relay through the first
 //! idear mcp join <link>       redeem an invite link from another person's app
 //! idear mcp status            identity, workspaces, roles, sync
 //! idear mcp relay <url|default|off>
@@ -18,9 +19,12 @@
 
 mod docs;
 pub mod peer;
+#[cfg(unix)]
+mod hub;
 mod rpc;
 mod tools;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use notes_core::identity::NameRecord;
@@ -87,22 +91,55 @@ async fn run(args: Vec<String>) -> i32 {
 }
 
 async fn serve() -> Res<()> {
-    let peer = Peer::open(&data_dir())?;
+    let dir = data_dir();
+    // Claude Desktop starts one copy for chat and another for Cowork and Code
+    // sessions. The first to get the folder serves them all; see `hub`.
+    #[cfg(unix)]
+    if Peer::busy(&dir) {
+        return hub::through(&dir).await;
+    }
+    let peer = match Peer::open(&dir) {
+        Ok(p) => Arc::new(p),
+        #[cfg(unix)]
+        Err(e) if e.starts_with(peer::BUSY) => return hub::through(&dir).await,
+        Err(e) => return Err(e),
+    };
     peer.take_inbox();
     peer.service.start().await;
     // Workspaces you give Claude in the app arrive as invites in its inbox.
-    let inbox = async {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            if peer.take_inbox() > 0 {
-                peer.service.kick();
+    let inbox = {
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(4)).await;
+                if peer.take_inbox() > 0 {
+                    peer.service.kick();
+                }
             }
-        }
+        })
     };
+    let served = serve_all(&peer, &dir).await;
+    inbox.abort();
+    served
+}
+
+#[cfg(unix)]
+async fn serve_all(peer: &Arc<Peer>, dir: &std::path::Path) -> Res<()> {
+    let listener = hub::Hub::bind(dir)?;
+    let own = tokio::select! {
+        r = rpc::serve(peer) => r,
+        r = listener.run(peer.clone()) => r,
+    };
+    // Our own client has gone; keep serving relayed sessions until they have too.
     tokio::select! {
-        r = rpc::serve(&peer) => r,
-        _ = inbox => Ok(()),
+        _ = listener.drained() => own,
+        r = listener.run(peer.clone()) => r,
     }
+}
+
+#[cfg(not(unix))]
+async fn serve_all(peer: &Arc<Peer>, _dir: &std::path::Path) -> Res<()> {
+    rpc::serve(peer).await
 }
 
 fn joined(peer: &Peer, workspace: &str) -> Option<Role> {
