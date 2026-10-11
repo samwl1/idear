@@ -1,0 +1,74 @@
+# Notes and whiteboards
+
+## Pages
+
+Everything lives in the sidebar tree: folders, notes, whiteboards, and projects. Any page can
+hold pages. Drag to rearrange; right-click or hover for the tools. Deleting a page or folder is
+immediate, with Undo in the message that follows.
+
+Every page has, under its title, **Tags:** and **References:**. References are the notes and
+whiteboards attached to a page, and what a note or whiteboard is itself attached to (projects,
+phases, tasks, other pages). Pick an existing item or type a name to start a new note already
+attached.
+
+The buttons by a page's title: **pin** it to the sidebar's Pinned section, and **pop out** the
+page into its own window. A popped-out window shows just that page; edits made in any window
+show up in the others.
+
+**Search** (Cmd/Ctrl+K) finds pages by title or text, tasks, saved views, and commands such as
+new page, switch workspace, and settings.
+
+## Writing
+
+The toolbar at the top of a note has headings, bold, italic, underline, strike, text color,
+highlight, lists, checklists, quotes, inline code, and links. Select text to use it; blocks come
+from the Insert button or by typing `/`.
+
+- **Tab** indents a list item under the one above (Shift+Tab lifts it). In a code block it adds
+  two spaces; anywhere else, a tab character.
+- **Links:** Cmd+click (Ctrl+click on Linux) opens a link in your browser; a plain click edits it.
+  Only http, https, and mailto links leave the app.
+
+### Blocks
+
+From `/` or Insert: code blocks with syntax highlighting, images (paste, drop, or upload), tables,
+info/note/warning/success/error panels, expands, child pages, and a table of contents.
+
+Notes are stored as markdown, and blocks are written in a readable form:
+
+````
+```rust                          code block with its language
+![Diagram](att:<id>)             image stored in the note's doc
+:::panel {type="warning"}        panel: info, note, warning, success, or error
+Text inside.
+:::
+:::expand {title="Details"}      expand, closed until clicked
+Hidden text.
+:::
+:::children {depth="1"} :::      child pages (depth "all" for every level)
+:::toc :::                       table of contents
+````
+
+Colored and highlighted text, which markdown can't express, are small inline `<span>`/`<mark>`
+tags; search ignores them. Tables hold one line of text per cell.
+
+**Images** are stored inside the note's own doc (a task's images in its project's doc), so they
+sync, travel in update files, and are signed with the text. Pasted, dropped, or uploaded images
+must be PNG, JPEG, GIF, or WebP; anything over 2400 px or 1.5 MB is scaled down, and the limit
+after that is 6 MB. Images from the web are never loaded: a shared note could otherwise use one
+to learn when and from where you opened it.
+
+## Whiteboards
+
+Whiteboards use Excalidraw: shapes with labels, text, freehand, lines, and arrows that stay
+attached. A shape's link icon opens its link (web links in your browser). The board's
+**References:** line attaches it to projects, phases, tasks, and pages, like a note.
+
+## Notes Hub and views
+
+**Notes Hub**, in the sidebar's Views section, lists every note in a grid with movable,
+resizable, sortable columns, and summaries written right in the grid.
+
+A saved **view** is a filter over notes, whiteboards, projects, and tasks: by type, tag (with `*`),
+text, status, assignee, key prefix (with `*`), and last updated. Views are stored in the
+workspace, so everyone with it sees them.

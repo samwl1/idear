@@ -1,0 +1,10 @@
+[workspace]
+members = ["src-tauri", "crates/core", "crates/peer", "crates/mcp"]
+resolver = "2"
+
+# Key derivation is deliberately expensive; unoptimized it takes many seconds in dev builds.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

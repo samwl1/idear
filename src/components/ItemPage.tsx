@@ -1,0 +1,292 @@
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { Editor } from "@tiptap/react";
+import { MarkdownEditor, Toolbar } from "./MarkdownEditor";
+import { Breadcrumbs } from "./Breadcrumbs";
+import { PinButton } from "./PinnedNav";
+import { isPinned, usePins } from "../lib/pins";
+import { ItemLinks, References } from "./Links";
+import { PopOutButton } from "./PopOutButton";
+import { A } from "../lib/automerge";
+import type { ItemBase, ItemKind, Note, Whiteboard, WorkspaceSession } from "../lib/session";
+import { useDebounced } from "../lib/useDebounced";
+import { Board } from "../whiteboard/Board";
+import { TrackerPage } from "../tracker/TrackerPage";
+import type { TrackerDoc } from "../tracker/model";
+import { useCanEdit } from "../lib/access";
+
+interface Props {
+  session: WorkspaceSession;
+  id: string;
+  kind: ItemKind;
+  /** For projects: a task to open on arrival. */
+  task?: string;
+  /** For projects: a tab to show on arrival. */
+  tab?: "board" | "backlog" | "phases" | "roadmap";
+  /** Changes on every open, so reopening jumps to the task or tab again. */
+  at?: number;
+  onOpen: (id: string) => void;
+  onError: (err: unknown) => void;
+}
+
+/** Loads the item doc, then renders its header and body. Keyed by id in the parent. */
+export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: Props) {
+  const [doc, setDoc] = useState<ItemBase | null>(null);
+  const editor = useRef<Editor | null>(null);
+  // The note's editor, for the toolbar in the top bar.
+  const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
+  const canEdit = useCanEdit();
+  const page = useMemo(() => ({ session, docId: id, pageId: id, onOpen, onError }), [session, id, onOpen, onError]);
+
+  useEffect(() => {
+    let live = true;
+    session.loadItem(id).then((d) => live && setDoc(d), onError);
+    return () => {
+      live = false;
+    };
+  }, [session, id, onError]);
+
+  if (!doc) return <div className="editor-loading" aria-busy="true" />;
+
+  if (kind === "whiteboard") {
+    return (
+      <article className="board-page">
+        <Board
+          session={session}
+          id={id}
+          initial={(doc as Whiteboard).elements}
+          onOpen={onOpen}
+          onError={onError}
+          header={(aside) => <ItemHeader session={session} id={id} kind={kind} initial={doc} onError={onError} onEnter={() => {}} top={false} aside={aside} />}
+        />
+      </article>
+    );
+  }
+
+  if (kind === "tracker") {
+    return (
+      <TrackerPage
+        session={session}
+        id={id}
+        initial={doc as unknown as TrackerDoc}
+        task={task}
+        tab={tab}
+        at={at}
+        onOpenItem={onOpen}
+        onError={onError}
+        header={(aside) => <ItemHeader session={session} id={id} kind={kind} initial={doc} onError={onError} onEnter={() => {}} top={false} aside={aside} />}
+      />
+    );
+  }
+
+  return (
+    <div className="note-page">
+      <ItemTop session={session} id={id} onError={onError}>
+        {canEdit && liveEditor && <Toolbar editor={liveEditor} page={page} insert />}
+      </ItemTop>
+    <article className="editor">
+      <ItemHeader
+        session={session}
+        id={id}
+        kind={kind}
+        initial={doc}
+        onError={onError}
+        onEnter={() => editor.current?.commands.focus("start")}
+        top={false}
+      />
+      <NoteBody
+        session={session}
+        id={id}
+        initial={(doc as Note).body}
+        onOpen={onOpen}
+        onError={onError}
+        onEditor={(e) => {
+          editor.current = e;
+          setLiveEditor(e);
+        }}
+      />
+    </article>
+    </div>
+  );
+}
+
+/** The slim bar above an item: where it is, and the pin. */
+function ItemTop({
+  session,
+  id,
+  onError,
+  children,
+}: {
+  session: WorkspaceSession;
+  id: string;
+  onError: (err: unknown) => void;
+  /** Sits in the middle of the bar: the note's formatting toolbar. */
+  children?: ReactNode;
+}) {
+  const pins = usePins(session.id);
+  return (
+    <div className="item-top">
+      <Breadcrumbs session={session} id={id} onError={onError} />
+      {children}
+      <PinButton workspace={session.id} pin={{ kind: "node", id }} pinned={isPinned(pins, { kind: "node", id })} />
+      <PopOutButton session={session} id={id} />
+    </div>
+  );
+}
+
+export function ItemHeader({
+  session,
+  id,
+  kind,
+  initial,
+  onError,
+  onEnter,
+  top = true,
+  aside,
+}: {
+  session: WorkspaceSession;
+  id: string;
+  kind: ItemKind;
+  initial: ItemBase;
+  onError: (err: unknown) => void;
+  onEnter: () => void;
+  /** Include the breadcrumb bar (notes render it outside the editor column). */
+  top?: boolean;
+  /** Sits to the right of the title: a project's location, pin, and Git button. */
+  aside?: ReactNode;
+}) {
+  const [title, setTitle] = useState(initial.title);
+  const [tags, setTags] = useState<string[]>([...initial.tags]);
+  const [draftTag, setDraftTag] = useState("");
+  // A fresh item lands with its title selected, ready to type over.
+  const canEdit = useCanEdit();
+  const [isFresh] = useState(() => canEdit && initial.title.startsWith("Untitled") && !(initial as Note).body);
+
+  const saveTitle = useDebounced((t: string) => {
+    session.changeItem(id, "rename", (d) => A.updateText(d, ["title"], t)).catch(onError);
+  }, 400);
+
+  const addTag = (raw: string) => {
+    const tag = raw.trim().toLowerCase();
+    setDraftTag("");
+    if (!tag || tags.includes(tag)) return;
+    setTags([...tags, tag]);
+    session.changeItem(id, "tag", (d) => void d.tags.push(tag)).catch(onError);
+  };
+
+  const removeTag = (tag: string) => {
+    setTags(tags.filter((t) => t !== tag));
+    session
+      .changeItem(id, "tag", (d) => {
+        const i = d.tags.indexOf(tag);
+        if (i >= 0) d.tags.splice(i, 1);
+      })
+      .catch(onError);
+  };
+
+  return (
+    <>
+      {top && <ItemTop session={session} id={id} onError={onError} />}
+      <div className="title-row">
+      <span className="title-fit" data-aside={aside ? true : undefined}>
+      {aside && (
+        <span className="title-sizer" aria-hidden="true">
+          {title || "Untitled"}
+        </span>
+      )}
+      <input
+        className="note-title"
+        size={1}
+        autoFocus={isFresh}
+        onFocus={(e) => isFresh && e.currentTarget.select()}
+        value={title}
+        readOnly={!canEdit}
+        placeholder="Untitled"
+        aria-label="Title"
+        onChange={(e) => {
+          setTitle(e.target.value);
+          saveTitle(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onEnter();
+          }
+        }}
+      />
+      </span>
+      {aside && <div className="title-aside">{aside}</div>}
+      </div>
+
+      <div className="item-meta">
+      <div className="tags">
+        <span className="item-links-label">Tags:</span>
+        {tags.map((t) => (
+          <span className="tag" key={t}>
+            {t}
+            {canEdit && (
+              <button aria-label={`Remove tag ${t}`} onClick={() => removeTag(t)}>
+                ×
+              </button>
+            )}
+          </span>
+        ))}
+        {canEdit && <input
+          className="tag-input"
+          value={draftTag}
+          placeholder="+ tag"
+          aria-label="Add tag"
+          onChange={(e) => setDraftTag(e.target.value)}
+          onBlur={() => addTag(draftTag)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") {
+              e.preventDefault();
+              addTag(draftTag);
+            }
+            if (e.key === "Backspace" && !draftTag && tags.length) {
+              removeTag(tags[tags.length - 1]);
+            }
+          }}
+        />}
+      </div>
+      <div className="item-links">
+        <span className="item-links-label">References:</span>
+        {kind === "note" || kind === "whiteboard" ? (
+          <ItemLinks session={session} itemId={id} onError={onError} />
+        ) : (
+          <References session={session} targetId={id} onError={onError} />
+        )}
+      </div>
+      </div>
+    </>
+  );
+}
+
+function NoteBody({
+  session,
+  id,
+  initial,
+  onOpen,
+  onError,
+  onEditor,
+}: {
+  session: WorkspaceSession;
+  id: string;
+  initial: string;
+  onOpen: (id: string) => void;
+  onError: (err: unknown) => void;
+  onEditor: (e: Editor | null) => void;
+}) {
+  const page = useMemo(() => ({ session, docId: id, pageId: id, onOpen, onError }), [session, id, onOpen, onError]);
+  return (
+    <MarkdownEditor
+      initial={initial}
+      label="Note body"
+      page={page}
+      toolbar={false}
+      onEditor={onEditor}
+      onChange={(md) =>
+        session.changeItem<Note>(id, "edit", (d) => A.updateText(d, ["body"], md)).catch(onError)
+      }
+    />
+  );
+}
