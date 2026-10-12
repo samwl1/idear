@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { BACKLOG, PRIORITIES, cleanPrefix, type Priority, type TrackerOps, type TrackerView } from "./model";
-import { TaskDot, deleteWithUndo } from "./bits";
+import { TaskDot, archiveWithUndo, deleteWithUndo, unarchiveWithUndo } from "./bits";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { References } from "../components/Links";
 import type { WorkspaceSession } from "../lib/session";
@@ -125,17 +125,29 @@ export function TaskDrawer({ session, view, ops, taskId, onOpenItem, onClose, wi
         <dl className="fields">
           <dt>Status</dt>
           <dd>
-            <span className="cell-select">
-              <TaskDot view={view} id={taskId} />
-              <select value={colId} onChange={(e) => run(ops.move(taskId, e.target.value, null))}>
-                <option value={BACKLOG}>Backlog</option>
-                {view.columns.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </span>
+            {view.archived(taskId) ? (
+              <span className="cell-select archived-cell">
+                <TaskDot view={view} id={taskId} />
+                <span>Archived</span>
+                {canEdit && (
+                  <button className="link-btn small" onClick={() => void unarchiveWithUndo(ops, view, [taskId], onError)}>
+                    Restore
+                  </button>
+                )}
+              </span>
+            ) : (
+              <span className="cell-select">
+                <TaskDot view={view} id={taskId} />
+                <select value={colId} onChange={(e) => run(ops.move(taskId, e.target.value, null))}>
+                  <option value={BACKLOG}>Backlog</option>
+                  {view.columns.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </span>
+            )}
           </dd>
 
           <dt>Priority</dt>
@@ -300,6 +312,15 @@ export function TaskDrawer({ session, view, ops, taskId, onOpenItem, onClose, wi
         </section>
 
         {canEdit && <footer className="drawer-foot">
+          {!view.archived(taskId) && (
+            <button
+              className="ghost"
+              title="Counts as done and leaves the board; stays in the Tasks tab under Done"
+              onClick={() => void archiveWithUndo(ops, view, [taskId], onError)}
+            >
+              <Icon name="archive" /> Archive
+            </button>
+          )}
           <button
             className="ghost"
             title="Deletes right away; undo from the message"

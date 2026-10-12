@@ -57,6 +57,12 @@ Claude runs idear itself, as `idear mcp`: no window, just Claude's connection ov
 process has Claude's own keys (in the system keychain, under `notes-app-claude`) and its own
 data folder.
 
+Claude Desktop starts that process more than once (once for chat, again for Cowork and Code
+sessions), and Claude Code adds its own. Only one copy may hold Claude's data folder, since two
+signing as the same device would fork its history, so the first one to start serves the rest:
+the others relay through a socket in that folder (`mcp.sock`), and it stays up until the last
+of them disconnects. Every connection sees the same Claude.
+
 When you give Claude access, the app creates an invite for that role and leaves it in Claude's
 inbox (a folder in Claude's data). Claude's connection picks it up and redeems it with your app
 over live sync, exactly like a person pasting an invite link. That's why idear needs to be open,
@@ -110,8 +116,9 @@ instructions, but no model is immune. To keep the damage small:
   under Settings → Devices.
 - **"Connected to a different copy of idear":** you moved or reinstalled the app. Click
   **Update**, then restart Claude Desktop.
-- **"Another copy of Claude's idear connection is already using …":** two Claude apps are
-  running it at once. Close one, or give one its own folder (above).
+- **"Another copy of Claude's idear connection holds … but isn't accepting connections":** the
+  copy holding the folder is an older build that doesn't relay. Quit Claude Desktop
+  and Claude Code so it exits, then reopen them.
 - **Claude sees old content:** reads sync first when the last sync was more than 20 seconds ago,
   but your app has to be open on a device Claude can reach. `sync_now` reports who was reached.
 - **Keychain prompts on macOS after updating idear:** choose **Always Allow**, as with the app.

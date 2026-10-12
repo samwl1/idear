@@ -28,6 +28,10 @@ from the Insert button or by typing `/`.
   two spaces; anywhere else, a tab character.
 - **Links:** Cmd+click (Ctrl+click on Linux) opens a link in your browser; a plain click edits it.
   Only http, https, and mailto links leave the app.
+- **On this page:** once a note has two or more headings, its outline sits to the right of the
+  text. The section you're reading is marked as you scroll; click a heading to jump to it. The
+  arrow in its title folds it to a strip of ticks (one per heading, still clickable); the choice
+  is remembered on this device. It hides in windows narrower than about 1100px.
 
 ### Blocks
 

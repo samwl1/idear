@@ -6289,3 +6289,356 @@ kbd {
 .backlog-phase {
   width: auto;
 }
+
+/* Context menu ------------------------------------------------------------------ */
+.context-menu {
+  position: fixed;
+  right: auto;
+  top: auto;
+  width: 13rem;
+  z-index: 60;
+}
+
+.context-menu .menu-item.danger {
+  color: var(--danger, #c0392b);
+}
+
+/* Tasks tab --------------------------------------------------------------------- */
+.tasks-filters {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.tasks-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 11rem;
+  transition: width 0.15s ease;
+}
+
+.tasks-search:focus-within {
+  width: 18rem;
+}
+
+.tasks-search > svg {
+  position: absolute;
+  left: 0.5rem;
+  color: var(--ink-3, var(--ink-2));
+  pointer-events: none;
+}
+
+.tasks-search .field {
+  width: 100%;
+  padding-left: 1.75rem;
+}
+
+.tasks-search .field::-webkit-search-cancel-button {
+  cursor: pointer;
+}
+
+.tasks-filters .backlog-phase[data-active] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tasks-check {
+  width: 1.5rem;
+  padding-right: 0 !important;
+}
+
+.tasks-check input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.tasks-table tbody tr[data-selected] > td {
+  background: var(--accent-soft);
+}
+
+.tasks-table tbody tr[data-archived] .task-key,
+.tasks-table tbody tr[data-archived] .link-btn[data-done] {
+  color: var(--ink-2);
+}
+
+.tasks-table .link-btn[data-done] {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, currentColor 45%, transparent);
+}
+
+.archived-pill {
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0 0.45rem;
+  line-height: 1.3;
+}
+
+.tasks-restore {
+  opacity: 0;
+}
+
+.tasks-table tbody tr:hover .tasks-restore,
+.tasks-table tbody tr:focus-within .tasks-restore {
+  opacity: 1;
+}
+
+.tasks-actions {
+  align-items: center;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  flex-wrap: wrap;
+}
+
+.tasks-actions-count {
+  font-weight: 600;
+  color: var(--accent);
+  margin-right: 0.25rem;
+  white-space: nowrap;
+}
+
+.tasks-actions .backlog-phase,
+.tasks-actions .tasks-tag {
+  background: var(--canvas);
+}
+
+.tasks-tag {
+  width: 9rem;
+}
+
+.tasks-actions-gap {
+  flex: 1;
+}
+
+.tasks-actions .ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.phase-close {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  width: auto;
+  white-space: nowrap;
+}
+
+.archived-cell {
+  gap: 0.5rem;
+}
+
+/* Outline rail (headings beside a note) ---------------------------------------- */
+.note-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.note-layout:has(.outline) {
+  grid-template-columns: minmax(0, 1fr) 13rem;
+}
+
+.note-layout > .editor {
+  grid-column: 1;
+}
+
+.outline {
+  position: sticky;
+  top: 3.5rem;
+  align-self: start;
+  max-height: calc(100vh - 4.5rem);
+  overflow-y: auto;
+  padding: 1.75rem 1.25rem 1rem 0;
+  font-size: 0.8rem;
+  scrollbar-width: thin;
+}
+
+.outline-title {
+  margin: 0 0 0.5rem 0.75rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.outline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 1px solid var(--rule);
+}
+
+.outline-list li {
+  margin: 0;
+}
+
+.outline-item {
+  display: block;
+  width: 100%;
+  padding: 0.25rem 0.5rem 0.25rem calc(0.75rem + var(--depth, 0) * 0.75rem);
+  margin-left: -1px;
+  border-left: 2px solid transparent;
+  color: var(--ink-2);
+  text-align: left;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.outline-item:hover {
+  color: var(--ink);
+}
+
+.outline-item[aria-current] {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  font-weight: 500;
+}
+
+@media (max-width: 1100px) {
+  .outline {
+    display: none;
+  }
+
+  .note-layout:has(.outline) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Tasks tab: scope pills ------------------------------------------------------- */
+.tasks-scopes {
+  display: inline-flex;
+  gap: 0.2rem;
+  margin: 0 0 0.75rem;
+  padding: 0.2rem;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--canvas);
+}
+
+.tasks-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.3rem 0.8rem;
+  border-radius: 999px;
+  color: var(--ink-2);
+  font-size: 0.85rem;
+}
+
+.tasks-scope:hover {
+  color: var(--ink);
+}
+
+.tasks-scope[aria-selected="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.tasks-scope-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.tasks-scope-n {
+  font-size: 0.72rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink-2);
+}
+
+.tasks-scope[aria-selected="true"] .tasks-scope-n {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.tasks-table tbody tr:not([data-selected]) > td {
+  border-bottom-color: color-mix(in srgb, var(--rule) 55%, transparent);
+}
+
+/* Unset values read as absent, not as text. */
+.tasks-table .muted,
+.tasks-table select.cell-plain[data-empty] {
+  color: color-mix(in srgb, var(--ink-2) 55%, transparent);
+}
+
+/* Outline rail: collapsed strip ----------------------------------------------- */
+.outline-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.outline-toggle {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  opacity: 0;
+}
+
+.outline:hover .outline-toggle,
+.outline-toggle:focus-visible,
+.outline-collapsed .outline-toggle {
+  opacity: 1;
+}
+
+.outline-toggle:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.note-layout:has(.outline-collapsed) {
+  grid-template-columns: minmax(0, 1fr) 3rem;
+}
+
+.outline-collapsed {
+  padding: 1.5rem 0.5rem 1rem 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.outline-ticks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  width: 18px;
+}
+
+.outline-ticks li {
+  width: calc(14px - var(--depth, 0) * 4px);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--rule);
+  cursor: pointer;
+}
+
+.outline-ticks li:hover {
+  background: var(--ink-2);
+}
+
+.outline-ticks li[data-current] {
+  background: var(--accent);
+}
+
+.rm-row[data-archived] .rm-title,
+.rm-row[data-archived] .task-key {
+  color: var(--ink-2);
+}

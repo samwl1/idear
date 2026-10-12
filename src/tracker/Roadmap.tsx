@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { NewTask, TrackerOps, TrackerView } from "./model";
-import { ChecklistCount, ConfirmDelete, DueDate, EditableText, InlineAdd, TaskDot } from "./bits";
+import { archiveWithUndo, ChecklistCount, ConfirmDelete, DueDate, EditableText, InlineAdd, TaskDot, taskMenuItems, unarchiveWithUndo } from "./bits";
+import { useContextMenu } from "../components/ContextMenu";
 import { Icon } from "../components/Icon";
 import { References } from "../components/Links";
 import type { WorkspaceSession } from "../lib/session";
@@ -34,9 +35,11 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
   const [target, setTarget] = useState<string | null>(null); // phase id, "" for no phase
   const targetRef = useRef<string | null>(null);
   const run = (p: Promise<unknown>) => p.catch(onError);
+  const ctx = useContextMenu();
   const phaseIds = new Set(view.phases.map((p) => p.id));
 
-  // Tasks in a phase; tasks pointing at a deleted phase count as having none.
+  // Tasks in a phase, archived ones included (they're still part of it);
+  // tasks pointing at a deleted phase count as having none.
   const inPhase = (phase: string) =>
     view
       .sortedByNumber()
@@ -95,16 +98,29 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
     ids.map((id) => {
       const t = view.tasks.get(id)!;
       const category = view.category(id);
+      const archived = view.archived(id);
       const list = view.checklist(id);
       return (
         <li key={id}>
-          <div className="rm-row" data-open={openTask === id || undefined} data-dragging={drag?.id === id || undefined} onPointerDown={(e) => startDrag(e, id)}>
+          <div
+            className="rm-row"
+            data-open={openTask === id || undefined}
+            data-archived={archived || undefined}
+            data-dragging={drag?.id === id || undefined}
+            onPointerDown={(e) => startDrag(e, id)}
+            onContextMenu={(e) => ctx.open(e, taskMenuItems(ops, view, id, canEdit, onOpenTask, onError))}
+          >
             <TaskDot view={view} id={id} />
             <span className="task-key">{view.key(id)}</span>
             <button className="link-btn rm-title" data-done={category === "done" || undefined} onClick={() => onOpenTask(id)}>
               {t.title || "Untitled task"}
             </button>
             <span className="rm-meta">
+              {archived && (
+                <span className="archived-pill" title="Archived: done and off the board">
+                  Archived
+                </span>
+              )}
               {list && <ChecklistCount view={view} id={id} />}
               {t.assignee && <span className="assignee">{t.assignee}</span>}
               <DueDate due={t.due} done={category === "done"} />
@@ -116,10 +132,16 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
 
   const section = (phase: { id: string; name: string; start?: string; end?: string } | null, index: number) => {
     const ids = inPhase(phase?.id ?? NO_PHASE);
+    const archived = ids.filter((id) => view.archived(id));
+    const live = ids.filter((id) => !view.archived(id));
     // The no-phase section only shows when it has tasks, or as a drop target mid-drag.
     if (!phase && ids.length === 0 && !drag) return null;
+    // Archived tasks are still part of the phase: category() already reads them as done.
     const { done, total } = view.progress(ids);
     const pct = total ? Math.round((done / total) * 100) : 0;
+    const closed = live.length === 0 && archived.length > 0;
+    const liveDone = view.progress(live);
+    const allDone = live.length > 0 && liveDone.done === liveDone.total;
 
     return (
       <section
@@ -140,11 +162,12 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
           ) : (
             <span className="phase-name muted">No phase</span>
           )}
-          <span className="phase-progress" title={`${done} of ${total} done`}>
+          <span className="phase-progress" title={`${done} of ${total} done${archived.length ? `, ${archived.length} archived` : ""}${closed ? " (closed)" : ""}`}>
             <span className="bar">
               <span style={{ width: `${pct}%` }} />
             </span>
             {done}/{total}
+            {closed && <span className="muted"> closed</span>}
           </span>
           {phase && (
             <span className="phase-dates">
@@ -176,6 +199,20 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
           {phase && (
             <span className="phase-tools">
               <PhaseNotes session={session} phaseId={phase.id} onError={onError} />
+              {canEdit && (closed ? (
+                <button className="tool phase-close" title="Bring the archived tasks back" onClick={() => void unarchiveWithUndo(ops, view, archived, onError)}>
+                  Reopen
+                </button>
+              ) : (
+                <button
+                  className="tool phase-close"
+                  disabled={!allDone}
+                  title={allDone ? "Archive every task in this phase" : total ? "Every task has to be done first" : "No tasks to close"}
+                  onClick={() => void archiveWithUndo(ops, view, live, onError, `${phase.name || "phase"} (${live.length} ${live.length === 1 ? "task" : "tasks"})`)}
+                >
+                  Close phase
+                </button>
+              ))}
               {canEdit && <>
               <button className="tool" aria-label="Move phase up" disabled={index === 0} onClick={() => run(ops.shiftPhase(phase.id, -1))}>
                 <Icon name="chevron" className="chev up" />
@@ -225,6 +262,7 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
       {view.phases.map((p, i) => section(p, i))}
       <InlineAdd label="Add phase" onAdd={(name) => run(ops.addPhase(name))} />
       {section(null, -1)}
+      {ctx.menu}
     </div>
   );
 }

@@ -608,6 +608,9 @@ fn read_tasks(doc: &automerge::Automerge, r: &automerge::ObjId) -> Result<Vec<Ta
             .get(&column)
             .cloned()
             .unwrap_or_else(|| (if column == "backlog" { "Backlog".into() } else { "".into() }, "todo".into()));
+        // An archived task is done wherever it was, and off the board.
+        let archived = get_bool(doc, &t, "archived")?.unwrap_or(false);
+        let (status, category) = if archived { ("Archived".to_string(), "done".to_string()) } else { (status, category) };
         let phase = get_string(doc, &t, "phase")?.and_then(|p| phases.get(&p).cloned()).unwrap_or_default();
         let number = get_i64(doc, &t, "number")?.unwrap_or(0);
         let task_prefix = get_string(doc, &t, "prefix")?.filter(|p| !p.is_empty()).unwrap_or_else(|| prefix.clone());

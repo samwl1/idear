@@ -11,12 +11,14 @@ peer to peer, and signed end to end.
   pages. Pin pages, views, and tasks to the top of the sidebar; pop any page out into its own
   window. Search everything with Cmd/Ctrl+K.
 - **Notes**: a formatting toolbar, `/` for blocks (code with highlighting, images, tables,
-  panels, expands, child pages, table of contents), Tab to indent, markdown underneath.
+  panels, expands, child pages, table of contents), an outline rail that follows your scroll,
+  Tab to indent, markdown underneath.
 - **Whiteboards** on Excalidraw.
 - **Projects**: a board with columns you shape (to do, in progress with progress bars, done),
-  a backlog, phases with planned windows and an active phase on the board, a roadmap (Gantt)
-  you schedule by dragging, task checklists, per-task keys like `IDR-12`, batch creation with
-  tokens (`Chapter #`, `+7 every 1w`), and Git: repositories on projects, branches on tasks.
+  a task list with filters, groups, and multi-select, archiving for done tasks, phases with
+  planned windows and an active phase on the board, a roadmap (Gantt) you schedule by dragging,
+  task checklists, per-task keys like `IDR-12`, batch creation with tokens (`Chapter #`,
+  `+7 every 1w`), and Git: repositories on projects, branches on tasks.
 - **References**: notes and whiteboards attach to projects, phases, tasks, and other pages.
 - **Views**: saved filters over everything; a Notes Hub grid for writing summaries.
 - **Your devices**, linked with a one-time code, sync peer to peer over iroh, end-to-end

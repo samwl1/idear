@@ -119,6 +119,11 @@ export interface Task {
   checklist?: ChecklistItem[];
   /** Branches this task is worked on. */
   branches?: BranchRef[];
+  /**
+   * When the task was put away (ms). An archived task counts as done wherever
+   * it was, leaves the board, and keeps its column so it can come back.
+   */
+  archived?: number;
   created: number;
 }
 
@@ -251,19 +256,36 @@ export class TrackerView {
     return this.tasks.get(taskId)?.column === BACKLOG;
   }
 
+  archived(taskId: string): boolean {
+    return !!this.tasks.get(taskId)?.archived;
+  }
+
+  /** On the board: in a column, not archived. */
+  onBoard(taskId: string): boolean {
+    const t = this.tasks.get(taskId);
+    return !!t && t.column !== BACKLOG && !t.archived;
+  }
+
+  /** An archived task is done wherever it was. */
   category(taskId: string): Category {
+    if (this.archived(taskId)) return "done";
     return this.columnCategory(this.taskColumn(taskId));
+  }
+
+  /** Tasks whose column is done, or that are archived, in this order of the id list. */
+  doneTasks(ids: string[]): string[] {
+    return ids.filter((id) => this.category(id) === "done");
   }
 
   color(taskId: string): ColumnColor {
     return this.columnColor(this.taskColumn(taskId));
   }
 
-  /** Tasks in a column (or BACKLOG), top to bottom. Tasks in a deleted column land in the first one. */
+  /** Tasks in a column (or BACKLOG), top to bottom, archived ones left out. Tasks in a deleted column land in the first one. */
   columnTasks(columnId: string): string[] {
     const first = this.columns[0]?.id;
     return [...this.tasks.entries()]
-      .filter(([, t]) => t.column === columnId || (columnId === first && t.column !== BACKLOG && !this.column(t.column)))
+      .filter(([, t]) => !t.archived && (t.column === columnId || (columnId === first && t.column !== BACKLOG && !this.column(t.column))))
       .sort(([ia, a], [ib, b]) => (a.order < b.order ? -1 : a.order > b.order ? 1 : ia < ib ? -1 : 1))
       .map(([id]) => id);
   }
@@ -320,6 +342,30 @@ function boundToPhase(d: TrackerDoc, taskId: string) {
     if (t.due && t.due > hi) t.due = hi;
   }
   if (t.start && t.due && t.due < t.start) t.due = t.start;
+}
+
+/** A plain copy of a task for putting back into a doc; a column that no longer exists becomes the first. */
+function cloneTask(d: TrackerDoc, t: Task): Task {
+  const task: Task = {
+    prefix: t.prefix,
+    number: t.number,
+    title: t.title,
+    description: t.description,
+    column: t.column === BACKLOG || d.columns?.some((c) => c.id === t.column) ? t.column : (d.columns?.[0]?.id ?? t.column),
+    order: t.order,
+    assignee: t.assignee,
+    priority: t.priority,
+    start: t.start ?? "",
+    due: t.due,
+    phase: t.phase,
+    tags: [...t.tags],
+    links: [...t.links],
+    checklist: (t.checklist ?? []).map((i) => ({ ...i })),
+    branches: (t.branches ?? []).map((b) => ({ ...b })),
+    created: t.created,
+  };
+  if (t.archived) task.archived = t.archived;
+  return task;
 }
 
 /** The key new tasks get until one is chosen: DEFAULT-1, DEFAULT-2… */
@@ -562,6 +608,113 @@ export class TrackerOps {
     });
   }
 
+  /**
+   * Put tasks away: they count as done, leave the board, and show under Done
+   * in the Tasks tab. One change, so Undo is one step.
+   */
+  archiveTasks(ids: string[]) {
+    const now = Date.now();
+    return this.change("task.archive", ids.length === 1 ? ids[0] : this.id, (d) => {
+      for (const id of ids) {
+        const t = d.tasks[id];
+        if (t && !t.archived) t.archived = now;
+      }
+    });
+  }
+
+  /** Bring archived tasks back to the column they were in. */
+  unarchiveTasks(ids: string[]) {
+    return this.change("task.unarchive", ids.length === 1 ? ids[0] : this.id, (d) => {
+      for (const id of ids) {
+        const t = d.tasks[id];
+        if (t && t.archived) delete t.archived;
+      }
+    });
+  }
+
+  /** Every task that is done and not yet archived, on the board (or in a column). */
+  archiveDone(columnId?: string) {
+    const v = this.view();
+    const ids = [...v.tasks.keys()].filter(
+      (id) => !v.archived(id) && v.category(id) === "done" && (!columnId || v.taskColumn(id) === columnId),
+    );
+    return this.archiveTasks(ids).then(() => ids);
+  }
+
+  /** Archive every task in a phase (Close phase). Returns the ids archived. */
+  archivePhase(phaseId: string) {
+    const v = this.view();
+    const ids = [...v.tasks.entries()].filter(([id, t]) => t.phase === phaseId && !v.archived(id)).map(([id]) => id);
+    return this.archiveTasks(ids).then(() => ids);
+  }
+
+  /** Several tasks' simple fields at once: one change, one Undo. */
+  updateMany(ids: string[], patch: Partial<Pick<Task, "assignee" | "priority" | "due" | "phase" | "start">>) {
+    return this.change("task.edit", this.id, (d) => {
+      for (const id of ids) {
+        const t = d.tasks[id];
+        if (!t) continue;
+        for (const [k, v] of Object.entries(patch)) (t as unknown as Record<string, unknown>)[k] = v;
+        if (patch.start && !t.due) t.due = patch.start;
+        if (patch.due && !t.start) t.start = patch.due;
+        if ("start" in patch || "due" in patch || "phase" in patch) boundToPhase(d, id);
+      }
+    });
+  }
+
+  /** Move several tasks to the end of a column (or the backlog) in one change. */
+  moveMany(ids: string[], column: string) {
+    const v = this.view();
+    const inColumn = v.columnTasks(column).filter((id) => !ids.includes(id));
+    let lo = inColumn.length ? v.tasks.get(inColumn[inColumn.length - 1])!.order : null;
+    const orders = ids.map(() => (lo = generateKeyBetween(lo, null)));
+    return this.change("task.move", this.id, (d) => {
+      ids.forEach((id, i) => {
+        const t = d.tasks[id];
+        if (!t) return;
+        if (t.column !== column) t.column = column;
+        t.order = orders[i];
+        if (t.archived) delete t.archived;
+      });
+    });
+  }
+
+  /** Add a tag to several tasks. */
+  addTagMany(ids: string[], tag: string) {
+    const clean = tag.trim();
+    if (!clean) return Promise.resolve();
+    return this.change("task.tag", this.id, (d) => {
+      for (const id of ids) {
+        const t = d.tasks[id];
+        if (t && !t.tags.includes(clean)) t.tags.push(clean);
+      }
+    });
+  }
+
+  /** Delete several tasks in one change. Returns them for Undo. */
+  async deleteTasks(ids: string[]): Promise<Record<string, { task: Task }>> {
+    const v = this.view();
+    const removed: Record<string, { task: Task }> = {};
+    for (const id of ids) {
+      const t = v.tasks.get(id);
+      if (t) removed[id] = { task: JSON.parse(JSON.stringify(t)) as Task };
+    }
+    await this.change("task.delete", this.id, (d) => {
+      for (const id of Object.keys(removed)) delete d.tasks[id];
+    });
+    return removed;
+  }
+
+  /** Put several deleted tasks back in one change. */
+  restoreTasks(removed: Record<string, { task: Task }>) {
+    return this.change("task.restore", this.id, (d) => {
+      for (const [id, r] of Object.entries(removed)) {
+        if (d.tasks[id]) continue;
+        d.tasks[id] = cloneTask(d, r.task);
+      }
+    });
+  }
+
   /** Delete a task. Returns it so `restoreTask` can put it back (Undo in the toast). */
   async deleteTask(taskId: string): Promise<{ task: Task } | null> {
     const v = this.view();
@@ -578,25 +731,7 @@ export class TrackerOps {
   restoreTask(taskId: string, removed: { task: Task }) {
     return this.change("task.restore", taskId, (d) => {
       if (d.tasks[taskId]) return;
-      const t = removed.task;
-      d.tasks[taskId] = {
-        prefix: t.prefix,
-        number: t.number,
-        title: t.title,
-        description: t.description,
-        column: t.column === BACKLOG || d.columns?.some((c) => c.id === t.column) ? t.column : (d.columns?.[0]?.id ?? t.column),
-        order: t.order,
-        assignee: t.assignee,
-        priority: t.priority,
-        start: t.start ?? "",
-        due: t.due,
-        phase: t.phase,
-        tags: [...t.tags],
-        links: [...t.links],
-        checklist: (t.checklist ?? []).map((i) => ({ ...i })),
-        branches: (t.branches ?? []).map((b) => ({ ...b })),
-        created: t.created,
-      };
+      d.tasks[taskId] = cloneTask(d, removed.task);
     });
   }
 

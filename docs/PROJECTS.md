@@ -1,6 +1,6 @@
 # Projects and tasks
 
-A project is a page with a board, a backlog, phases, and a roadmap. Its tasks have keys like
+A project is a page with a board, a task list, phases, and a roadmap. Its tasks have keys like
 `IDR-12`, a checklist, dates, tags, references, and Git branches.
 
 Beside the project's title: a pin, a pop-out button (the page in its own window), and the
@@ -13,7 +13,8 @@ Columns hold tasks; drag a card anywhere into another column, including the empt
 its last card. Columns scroll on their own, and dragging near a column's top or bottom edge
 scrolls it. Drag a column header to reorder columns.
 
-The bar above the columns shows how many of the tasks on the board are done.
+The bar above the columns shows how many tasks are done: those on the board plus any archived
+ones (in the phase shown, or overall).
 
 **Column modes.** The column's ⋯ menu sets its name, color, status dot, and what being in it
 means:
@@ -23,16 +24,25 @@ means:
   average across its tasks.
 - **Done**: tasks here count as done everywhere (the board total, phases, the roadmap, views).
 
-**Backlog.** A task whose status is Backlog isn't on the board; it waits in the Backlog tab until
-you move it into a column (from the Backlog tab's status cell or the task panel). New tasks start
+**Backlog.** A task whose status is Backlog isn't on the board; it waits in the Tasks tab until
+you move it into a column (from the Tasks tab's status cell or the task panel). New tasks start
 there unless the defaults say otherwise.
 
+**Clearing done tasks.** Done tasks pile up in their column until you archive them. Nothing is
+automatic: right-click a card (or a row in the Tasks tab) and choose **Archive**, pick **Clear
+done** in a done column's ⋯ menu to archive everything in it, or **Close phase** on the Phases tab
+once every task in a phase is done. An archived task counts as done wherever it was, leaves the
+board, and stays in the Tasks tab under Done with an Archived mark. Archiving a task that isn't
+done marks it done. **Restore** (on the row, in the task panel, or Reopen on a closed phase) puts
+it back in the column it came from. Every one of these offers Undo. Archiving doesn't take a task
+out of its phase: the phase's progress still counts it as done.
+
 **Active phase.** Once a project has phases, the board's Phase selector narrows it to one phase;
-its other tasks stay in the Backlog tab. With a start and end set on the phase, a bar shows how far
+its other tasks stay in the Tasks tab. With a start and end set on the phase, a bar shows how far
 through that window today is.
 
-**Cards.** Hover a card for its tools: Git (when a branch is linked), pin, and delete. The task open
-in the panel has an accent border.
+**Cards.** Hover a card for its tools: Git (when a branch is linked), pin, and delete. Right-click
+for Open, Archive, and Delete. The task open in the panel has an accent border.
 
 ## Tasks
 
@@ -42,7 +52,7 @@ status, priority, assignee, start and due dates, phase, tags, and the sections b
 
 **Checklist.** Steps to tick off. Add items at the bottom, double-click one to rename it, tick it
 when done. The task's progress is the share of items ticked; it shows on cards in In progress
-columns, in the backlog, and on the roadmap.
+columns, in the Tasks tab, and on the roadmap.
 
 **Git.** Branches of the project's repositories (see [Git](#git)).
 
@@ -63,8 +73,20 @@ project that hasn't picked a key uses `DEFAULT`.
 deletes on the second click; the panel has Delete task at the bottom. Deleting is immediate and
 the message that follows offers Undo.
 
-The **Backlog** tab lists every task in a sortable table, filtered by text (title, key, tag,
-assignee) and by phase.
+## Tasks tab
+
+Every task in a sortable table: click a column header to sort. Search (title, key, tag, assignee)
+and the filter selects (phase, status, priority, assignee, tag) narrow it; **Clear** resets them.
+They're remembered per project on this device.
+
+The pills under the filters pick which tasks you're looking at, with counts: **On board** (in a
+column, done or not), **Backlog** (off the board), **Archived**, or **All**.
+
+**Selecting.** Tick rows (shift-click for a range, the header checkbox for everything shown, or
+Select all shown from the right-click menu) and a bar replaces the filters: move to a column, set
+phase, priority, or assignee, add a tag, archive, or delete. Each applies to every selected task
+in one step, so Undo undoes it all. Right-click a selected row for the same actions; Esc clears
+the selection.
 
 ## Creating tasks
 
@@ -170,6 +192,10 @@ its planned start and end next to the progress bar, reorder with the arrows, and
 between phases. The trash button asks once (**Delete?**); the tasks stay, without a phase. The
 note icon holds the phase's references.
 
+Archived tasks stay listed in their phase, greyed with an Archived mark, and still count in its
+progress. **Close phase** archives every task in the phase once they're all done; the phase then
+reads "closed" next to its progress, and **Reopen** brings them back.
+
 ## Roadmap
 
 The Roadmap tab draws every dated task on a timeline.
@@ -199,7 +225,7 @@ The Roadmap tab draws every dated task on a timeline.
 ## Git
 
 A project links to its repositories; a task links to branches of them. The Git button (branch
-icon) sits beside the project's title, in the task panel header, and on cards and backlog rows
+icon) sits beside the project's title, in the task panel header, and on cards and task rows
 that have a branch.
 
 - **Grey**: nothing linked. Click to add.

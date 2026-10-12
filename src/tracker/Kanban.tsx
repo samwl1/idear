@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import type React from "react";
 import { COLUMN_COLORS, COLUMN_ICONS, COLUMN_MODES, type Category, type Column, type ColumnColor, type ColumnIcon, type TrackerOps, type TrackerView } from "./model";
-import { ChecklistCount, DeleteTaskButton, DueDate, InlineAdd, PriorityPill, ProgressBar, StatusDot } from "./bits";
+import { archiveWithUndo, ChecklistCount, DeleteTaskButton, DueDate, InlineAdd, PriorityPill, ProgressBar, StatusDot, taskMenuItems } from "./bits";
+import { useContextMenu } from "../components/ContextMenu";
 import { useCanEdit } from "../lib/access";
 import { isPinned, usePins } from "../lib/pins";
 import { PinButton } from "../components/PinnedNav";
@@ -35,6 +36,7 @@ export function Kanban({ workspace, view, ops, openTask, onOpenTask, onError }: 
   // Column drops are shown as a line before this column (null: after the last).
   const [colDrop, setColDrop] = useState<{ before: string | null } | null>(null);
   const run = (p: Promise<unknown>) => p.catch(onError);
+  const ctx = useContextMenu();
 
   const endDrag = () => {
     setDrag(null);
@@ -143,16 +145,18 @@ export function Kanban({ workspace, view, ops, openTask, onOpenTask, onError }: 
 
   // The active phase: only its tasks are on the board; the rest wait in the backlog.
   const active = view.doc.activePhase && view.phases.find((p) => p.id === view.doc.activePhase);
-  const onBoard = (id: string) => !view.inBacklog(id) && (!active || view.tasks.get(id)!.phase === active.id);
+  const onBoard = (id: string) => view.onBoard(id) && (!active || view.tasks.get(id)!.phase === active.id);
   const boardIds = [...view.tasks.keys()].filter(onBoard);
-  const hidden = view.tasks.size - boardIds.length;
-  const total = view.progress(boardIds);
+  const hidden = [...view.tasks.keys()].filter((id) => !view.archived(id)).length - boardIds.length;
+  // Archived tasks have left the board but still count as done in its total (within the phase shown, or overall).
+  const archivedIds = [...view.tasks.keys()].filter((id) => view.archived(id) && (!active || view.tasks.get(id)!.phase === active.id));
+  const total = view.progress([...boardIds, ...archivedIds]);
   const span = active && active.start && active.end ? phaseWindow(active.start, active.end) : null;
 
   return (
     <div className="board">
       <div className="board-bar">
-          <span className="board-total" title={`${total.done} of ${total.total} tasks on the board are done`}>
+          <span className="board-total" title={`${total.done} of ${total.total} tasks are done${archivedIds.length ? ` (${archivedIds.length} archived)` : ""}`}>
             <ProgressBar value={total.total ? total.done / total.total : 0} label="Tasks done" className="board-total-bar" />
             <span className="muted small">
               {total.done}/{total.total} done
@@ -249,6 +253,8 @@ export function Kanban({ workspace, view, ops, openTask, onOpenTask, onError }: 
                 icon={view.columnIcon(col.id)}
                 mode={mode}
                 columns={view.columns}
+                doneCount={mode === "done" ? ids.length : 0}
+                onClearDone={() => void archiveWithUndo(ops, view, ids, onError, `${ids.length} ${ids.length === 1 ? "task" : "tasks"} from ${col.name || "the column"}`)}
                 ops={ops}
                 onError={onError}
               />}
@@ -274,6 +280,7 @@ export function Kanban({ workspace, view, ops, openTask, onOpenTask, onError }: 
                         setDrag({ kind: "task", id });
                       }}
                       onClick={() => onOpenTask(id)}
+                      onContextMenu={(e) => ctx.open(e, taskMenuItems(ops, view, id, canEdit, onOpenTask, onError))}
                     >
                       <span className="kcard-top">
                         <span className="task-key">{view.key(id)}</span>
@@ -318,6 +325,7 @@ export function Kanban({ workspace, view, ops, openTask, onOpenTask, onError }: 
         </div>
       )}
     </div>
+    {ctx.menu}
     </div>
   );
 }
@@ -345,6 +353,8 @@ function ColumnSettings({
   icon,
   mode,
   columns,
+  doneCount,
+  onClearDone,
   ops,
   onError,
 }: {
@@ -353,6 +363,9 @@ function ColumnSettings({
   icon: ColumnIcon;
   mode: Category;
   columns: Column[];
+  /** Tasks a "Clear done" would archive (done columns only). */
+  doneCount: number;
+  onClearDone: () => void;
   ops: TrackerOps;
   onError: (err: unknown) => void;
 }) {
@@ -470,6 +483,20 @@ function ColumnSettings({
           </div>
 
           <div className="switcher-sep" />
+
+          {mode === "done" && (
+            <button
+              className="menu-item"
+              disabled={!doneCount}
+              title={doneCount ? "Archive every task in this column. They stay in the Tasks tab under Done." : "Nothing to clear"}
+              onClick={() => {
+                close();
+                onClearDone();
+              }}
+            >
+              Clear done{doneCount ? ` (${doneCount})` : ""}
+            </button>
+          )}
 
           {!deleting ? (
             <button

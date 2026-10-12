@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ColumnColor, ColumnIcon, Priority, TrackerOps, TrackerView } from "./model";
 import { Icon } from "../components/Icon";
+import type { MenuItem } from "../components/ContextMenu";
 import { useCanEdit } from "../lib/access";
 import { showToast } from "../lib/toast";
 
@@ -63,6 +64,72 @@ export async function deleteWithUndo(ops: TrackerOps, view: TrackerView, id: str
   } catch (e) {
     onError(e);
   }
+}
+
+/** Delete several tasks in one step; the toast offers Undo. */
+export async function deleteManyWithUndo(ops: TrackerOps, ids: string[], onError: (err: unknown) => void) {
+  if (!ids.length) return;
+  try {
+    const removed = await ops.deleteTasks(ids);
+    const n = Object.keys(removed).length;
+    if (!n) return;
+    showToast(`Deleted ${n} ${n === 1 ? "task" : "tasks"}`, {
+      action: { label: "Undo", run: () => ops.restoreTasks(removed).catch(onError) },
+    });
+  } catch (e) {
+    onError(e);
+  }
+}
+
+/** Archive tasks (they count as done and leave the board); the toast offers Undo. */
+export async function archiveWithUndo(ops: TrackerOps, view: TrackerView, ids: string[], onError: (err: unknown) => void, what?: string) {
+  const live = ids.filter((id) => view.tasks.has(id) && !view.archived(id));
+  if (!live.length) return;
+  try {
+    await ops.archiveTasks(live);
+    const label = what ?? (live.length === 1 ? view.key(live[0]) : `${live.length} tasks`);
+    showToast(`Archived ${label}`, {
+      action: { label: "Undo", run: () => ops.unarchiveTasks(live).catch(onError) },
+    });
+  } catch (e) {
+    onError(e);
+  }
+}
+
+/** Bring archived tasks back; the toast offers Undo. */
+export async function unarchiveWithUndo(ops: TrackerOps, view: TrackerView, ids: string[], onError: (err: unknown) => void) {
+  const gone = ids.filter((id) => view.archived(id));
+  if (!gone.length) return;
+  try {
+    await ops.unarchiveTasks(gone);
+    showToast(`Restored ${gone.length === 1 ? view.key(gone[0]) : `${gone.length} tasks`}`, {
+      action: { label: "Undo", run: () => ops.archiveTasks(gone).catch(onError) },
+    });
+  } catch (e) {
+    onError(e);
+  }
+}
+
+/**
+ * The right-click menu for one task, shared by cards and rows: open, archive
+ * or restore, delete.
+ */
+export function taskMenuItems(
+  ops: TrackerOps,
+  view: TrackerView,
+  id: string,
+  canEdit: boolean,
+  onOpen: (id: string) => void,
+  onError: (err: unknown) => void,
+): MenuItem[] {
+  const archived = view.archived(id);
+  const done = view.category(id) === "done";
+  const items: MenuItem[] = [{ label: "Open", onSelect: () => onOpen(id) }];
+  if (!canEdit) return items;
+  if (archived) items.push({ label: "Restore to board", onSelect: () => void unarchiveWithUndo(ops, view, [id], onError) });
+  else items.push({ label: done ? "Archive" : "Archive (marks done)", onSelect: () => void archiveWithUndo(ops, view, [id], onError) });
+  items.push({ label: "Delete", onSelect: () => void deleteWithUndo(ops, view, id, onError), danger: true, separator: true });
+  return items;
 }
 
 /**

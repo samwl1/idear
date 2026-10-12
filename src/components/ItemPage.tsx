@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Editor } from "@tiptap/react";
 import { MarkdownEditor, Toolbar } from "./MarkdownEditor";
+import { OutlineRail } from "./OutlineRail";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { PinButton } from "./PinnedNav";
 import { isPinned, usePins } from "../lib/pins";
@@ -83,6 +84,7 @@ export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: 
       <ItemTop session={session} id={id} onError={onError}>
         {canEdit && liveEditor && <Toolbar editor={liveEditor} page={page} insert />}
       </ItemTop>
+    <div className="note-layout">
     <article className="editor">
       <ItemHeader
         session={session}
@@ -105,6 +107,8 @@ export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: 
         }}
       />
     </article>
+    <OutlineRail editor={liveEditor} />
+    </div>
     </div>
   );
 }

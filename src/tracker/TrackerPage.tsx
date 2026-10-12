@@ -6,7 +6,7 @@ import { TaskDefaultsMenu, templateOf, tokenContext, type TaskDefaults } from ".
 import { Gantt } from "./Gantt";
 import { expand } from "./tokens";
 import { Kanban } from "./Kanban";
-import { Backlog } from "./Backlog";
+import { Tasks } from "./Tasks";
 import { Roadmap } from "./Roadmap";
 import { TaskDrawer } from "./TaskDrawer";
 import { Icon } from "../components/Icon";
@@ -19,7 +19,7 @@ import { useCanEdit } from "../lib/access";
 type Tab = "board" | "backlog" | "phases" | "roadmap";
 const TABS: { id: Tab; label: string }[] = [
   { id: "board", label: "Board" },
-  { id: "backlog", label: "Backlog" },
+  { id: "backlog", label: "Tasks" },
   { id: "phases", label: "Phases" },
   { id: "roadmap", label: "Roadmap" },
 ];
@@ -240,7 +240,7 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
         {tab === "board" && (
           <Kanban workspace={session.id} view={view} ops={ops} openTask={openTask} onOpenTask={setOpenTask} onError={onError} />
         )}
-        {tab === "backlog" && <Backlog workspace={session.id} view={view} ops={ops} openTask={openTask} onOpenTask={setOpenTask} onError={onError} />}
+        {tab === "backlog" && <Tasks workspace={session.id} view={view} ops={ops} openTask={openTask} onOpenTask={setOpenTask} onError={onError} />}
         {tab === "phases" && (
           <Roadmap session={session} view={view} ops={ops} create={create} nextName={nextName} openTask={openTask} onOpenTask={setOpenTask} onError={onError} />
         )}

@@ -18,13 +18,14 @@ crates/peer/        Shared by the app and Claude's peer: keychain, identity, inv
   sync.rs           Live sync and invite redemption over iroh
   removals.rs       Deleting workspaces: trash, restore, tombstones synced between your devices
   inbox.rs          Handing invites to Claude on the same computer
-crates/mcp/         Claude's own peer, served over MCP (stdio); the app runs it as `idear mcp`
+crates/mcp/         Claude's own peer, served over MCP (stdio); the app runs it as `idear mcp`.
+                    hub.rs: extra copies relay through the first over a Unix socket
 src-tauri/          Desktop shell: IPC commands
   share.rs          Invites, roles, joining
   claude.rs         Settings → Claude: access per workspace, Claude Desktop config
 src/                React frontend
   whiteboard/       Storage schema, Excalidraw adapter, board component
-  tracker/          Project model and ops, board, backlog, roadmap, task drawer
+  tracker/          Project model and ops, board, Tasks tab, phases, roadmap, task drawer
   lib/session.ts    Owns Automerge docs in the UI; every edit becomes one signed change
   components/       Workspace switcher, tree, note editor, activity log
 ```
@@ -118,8 +119,12 @@ belong to each device and live in the app's local storage.
 
 - No encryption at rest yet (planned: SQLCipher plus encrypted doc files, key in keychain).
 - A locked or missing keyring stops the app at launch with an error instead of a UI prompt.
-- The Notes Hub column layout, pins, sidebar width, and which sidebar sections are collapsed are
-  saved on each device, not synced.
+- The Notes Hub column layout, pins, sidebar width, which sidebar sections are collapsed, and the
+  Tasks tab's filters, sort, and scope, and whether a note's outline is folded, are saved on each
+  device, not synced.
+- Archiving a task sets `archived` (a timestamp) on it; the task keeps its column, so restoring
+  puts it back where it was. Readers treat an archived task as done (the Rust index reports status
+  "Archived", category done).
 - Views are stored in the workspace, so everyone with it sees them; there are no private views yet.
 - Assignees are free-text names. Workspace members are suggested, and `@me` matches your name.
 - Task numbers are assigned locally, so two devices creating tasks offline can produce the same
