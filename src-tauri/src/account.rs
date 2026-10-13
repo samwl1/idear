@@ -11,8 +11,9 @@ use tauri::State;
 use crate::commands::AppState;
 use notes_peer::keychain;
 
-/// Link codes stop working after this long.
-const INVITE_TTL_MS: i64 = 15 * 60 * 1000;
+/// How long a link code works by default, and the most it can be asked to.
+const INVITE_DEFAULT_MINUTES: i64 = 15;
+const INVITE_MAX_MINUTES: i64 = 7 * 24 * 60;
 
 pub use notes_peer::account::Account;
 use notes_peer::account::ensure_box_key;
@@ -109,13 +110,21 @@ pub struct InviteView {
     expires: i64,
 }
 
+/// `minutes`: how long the code should work, up to a week. The window only
+/// limits how long a captured code and passphrase stay useful; the passphrase
+/// is what protects the code.
 #[tauri::command]
-pub async fn create_link_code(state: State<'_, AppState>) -> CmdResult<InviteView> {
+pub async fn create_link_code(state: State<'_, AppState>, minutes: Option<i64>) -> CmdResult<InviteView> {
+    let minutes = minutes.unwrap_or(INVITE_DEFAULT_MINUTES);
+    if !(1..=INVITE_MAX_MINUTES).contains(&minutes) {
+        return Err("A link code can last from a minute to a week.".into());
+    }
+    let ttl = minutes * 60 * 1000;
     with_account(&state, |a, d| {
         let passphrase = new_passphrase().map_err(|e| e.to_string())?;
-        let code = create_invite(&a.user, &a.state, &key_id(&d.verifying_key()), &passphrase, INVITE_TTL_MS)
+        let code = create_invite(&a.user, &a.state, &key_id(&d.verifying_key()), &passphrase, ttl)
             .map_err(|e| e.to_string())?;
-        Ok(InviteView { code, passphrase, expires: notes_core_now() + INVITE_TTL_MS })
+        Ok(InviteView { code, passphrase, expires: notes_core_now() + ttl })
     })
 }
 
