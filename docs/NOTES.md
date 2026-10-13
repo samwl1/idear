@@ -26,12 +26,19 @@ from the Insert button or by typing `/`.
 
 - **Tab** indents a list item under the one above (Shift+Tab lifts it). In a code block it adds
   two spaces; anywhere else, a tab character.
+- **Moving blocks:** Alt+↑ and Alt+↓ (Option on a Mac) move the block the cursor is in past its
+  neighbour: a paragraph, heading, list, panel, expand, code block, or table. Inserted blocks
+  (panels, expands, code, images, contents, child pages) also show a ⋮⋮ grip at their left edge
+  on hover; drag it to put the block anywhere in the note.
 - **Links:** Cmd+click (Ctrl+click on Linux) opens a link in your browser; a plain click edits it.
   Only http, https, and mailto links leave the app.
-- **On this page:** once a note has two or more headings, its outline sits to the right of the
-  text. The section you're reading is marked as you scroll; click a heading to jump to it. The
-  arrow in its title folds it to a strip of ticks (one per heading, still clickable); the choice
-  is remembered on this device. It hides in windows narrower than about 1100px.
+- **Width:** Settings → Appearance → Note width. Narrow, Normal, and Wide cap the line length,
+  and **Alignment** puts the note in the middle of the window or against its left edge; **Full**
+  uses the whole window, with a Margins slider for the space on each side. Per device.
+- **On this page:** once a note has a heading, its outline sits to the right of the text. The
+  section you're reading is marked as you scroll; click a heading to jump to it. The arrow in its
+  title folds it to a strip of ticks (one per heading, still clickable); the choice is remembered
+  on this device. In windows narrower than about 1100px it folds on its own.
 
 ### Blocks
 

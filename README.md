@@ -27,7 +27,8 @@ peer to peer, and signed end to end.
   and a signed audit trail of who changed what.
 - **Claude, built in**: one click adds idear to Claude Desktop (or one command to Claude Code);
   Claude is its own signed member, allowed in per workspace.
-- **Settings**: eleven themes, accent, text size, density, note font and width, accessibility
+- **Settings**: eleven themes, accent, text size, density, note font, width (narrow to full, with
+  adjustable margins) and alignment, accessibility
   (contrast, readable font, underlined links, strong focus rings, reduced motion), and Help.
 
 ## Guides

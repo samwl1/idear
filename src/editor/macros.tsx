@@ -69,12 +69,30 @@ export const LANGUAGES: { value: string; label: string }[] = [
   ["yaml", "YAML"],
 ].map(([value, label]) => ({ value, label }));
 
+/**
+ * The handle that moves a block: shows at the block's left edge on hover, and
+ * dragging it carries the whole block (ProseMirror reads `data-drag-handle`).
+ */
+export function Grip({ editor }: { editor: ReactNodeViewProps["editor"] }) {
+  if (!editor.isEditable) return null;
+  return (
+    <span className="block-grip" data-drag-handle contentEditable={false} title="Drag to move (or Alt+↑ / Alt+↓)" aria-hidden="true">
+      <svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor">
+        <circle cx="3" cy="3" r="1.3" /><circle cx="7" cy="3" r="1.3" />
+        <circle cx="3" cy="8" r="1.3" /><circle cx="7" cy="8" r="1.3" />
+        <circle cx="3" cy="13" r="1.3" /><circle cx="7" cy="13" r="1.3" />
+      </svg>
+    </span>
+  );
+}
+
 function CodeBlockView({ node, updateAttributes, editor }: ReactNodeViewProps) {
   const [copied, setCopied] = useState(false);
   const language = (node.attrs.language as string | null) ?? "";
   const known = LANGUAGES.some((l) => l.value === language);
   return (
     <NodeViewWrapper className="code-block">
+      <Grip editor={editor} />
       <div className="code-head" contentEditable={false}>
         {editor.isEditable ? (
           <select
@@ -115,6 +133,7 @@ function CodeBlockView({ node, updateAttributes, editor }: ReactNodeViewProps) {
 }
 
 export const CodeBlock = CodeBlockLowlight.extend({
+  draggable: true,
   addNodeView() {
     return ReactNodeViewRenderer(CodeBlockView);
   },
@@ -174,6 +193,7 @@ function ImageView({ node, extension, selected, editor, updateAttributes }: Reac
 
   return (
     <NodeViewWrapper className="image-block" data-selected={selected || undefined}>
+      <Grip editor={editor} />
       {isLocalData(src) && ctx && editor.isEditable ? (
         <div className="image-blocked" contentEditable={false}>
           Adding image…
@@ -196,6 +216,7 @@ function ImageView({ node, extension, selected, editor, updateAttributes }: Reac
 }
 
 export const AttachmentImage = Image.extend<{ page: PageContext | null }>({
+  draggable: true,
   addOptions() {
     return { ...this.parent?.(), page: null } as never;
   },
@@ -321,6 +342,7 @@ function PanelView({ node, updateAttributes, editor }: ReactNodeViewProps) {
   const type = PANEL_TYPES.find((p) => p.value === node.attrs.type) ?? PANEL_TYPES[0];
   return (
     <NodeViewWrapper className="panel" data-type={type.value}>
+      <Grip editor={editor} />
       <span className="panel-icon" contentEditable={false}>
         {editor.isEditable ? (
           <select
@@ -349,6 +371,7 @@ export const Panel = Node.create({
   group: "block",
   content: "block+",
   defining: true,
+  draggable: true,
   addAttributes() {
     return {
       type: {
@@ -388,6 +411,7 @@ function ExpandView({ node, updateAttributes, editor }: ReactNodeViewProps) {
   const title = String(node.attrs.title ?? "");
   return (
     <NodeViewWrapper className="expand" data-open={open || undefined}>
+      <Grip editor={editor} />
       <div className="expand-head" contentEditable={false}>
         <button type="button" className="expand-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
           <Icon name="chevron" className={open ? "chev open" : "chev"} />
@@ -416,6 +440,7 @@ export const Expand = Node.create({
   group: "block",
   content: "block+",
   defining: true,
+  draggable: true,
   addAttributes() {
     return {
       title: {
@@ -485,6 +510,7 @@ function ChildrenView({ node, updateAttributes, editor, extension }: ReactNodeVi
   const all = node.attrs.depth === "all";
   return (
     <NodeViewWrapper className="macro children-macro" contentEditable={false}>
+      <Grip editor={editor} />
       <div className="macro-head">
         <Icon name="folder" /> Child pages
         {editor.isEditable && (
@@ -568,6 +594,7 @@ function TocView({ editor }: ReactNodeViewProps) {
 
   return (
     <NodeViewWrapper className="macro toc-macro" contentEditable={false}>
+      <Grip editor={editor} />
       <div className="macro-head">
         <Icon name="view" /> Contents
       </div>

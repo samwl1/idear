@@ -241,6 +241,7 @@ export class TrackerView {
   }
 
   icon(taskId: string): ColumnIcon {
+    if (this.archived(taskId)) return "full";
     return this.columnIcon(this.taskColumn(taskId));
   }
 

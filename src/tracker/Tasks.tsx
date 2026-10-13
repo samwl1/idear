@@ -355,8 +355,7 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
               onChange={(e) => set({ q: e.target.value })}
             />
           </label>
-          {view.phases.length > 0 && (
-            <select className="field backlog-phase" aria-label="Phase" data-active={!!prefs.phase || undefined} value={prefs.phase} onChange={(e) => set({ phase: e.target.value })}>
+                      <select className="field backlog-phase" aria-label="Phase" data-active={!!prefs.phase || undefined} value={prefs.phase} onChange={(e) => set({ phase: e.target.value })}>
               <option value="">Any phase</option>
               {view.phases.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -365,7 +364,6 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
               ))}
               <option value="none">No phase</option>
             </select>
-          )}
           <select className="field backlog-phase" aria-label="Status" data-active={!!prefs.status || undefined} value={prefs.status} onChange={(e) => set({ status: e.target.value })}>
             <option value="">Any status</option>
             <option value={BACKLOG}>Backlog</option>
@@ -383,8 +381,7 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
               </option>
             ))}
           </select>
-          {assignees.length > 0 && (
-            <select className="field backlog-phase" aria-label="Assignee" data-active={!!prefs.assignee || undefined} value={prefs.assignee} onChange={(e) => set({ assignee: e.target.value })}>
+                      <select className="field backlog-phase" aria-label="Assignee" data-active={!!prefs.assignee || undefined} value={prefs.assignee} onChange={(e) => set({ assignee: e.target.value })}>
               <option value="">Anyone</option>
               {assignees.map((a) => (
                 <option key={a} value={a}>
@@ -393,9 +390,7 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
               ))}
               <option value="none">Unassigned</option>
             </select>
-          )}
-          {tags.length > 0 && (
-            <select className="field backlog-phase" aria-label="Tag" data-active={!!prefs.tag || undefined} value={prefs.tag} onChange={(e) => set({ tag: e.target.value })}>
+                      <select className="field backlog-phase" aria-label="Tag" data-active={!!prefs.tag || undefined} value={prefs.tag} onChange={(e) => set({ tag: e.target.value })}>
               <option value="">Any tag</option>
               {tags.map((t) => (
                 <option key={t} value={t}>
@@ -403,7 +398,6 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
                 </option>
               ))}
             </select>
-          )}
           {filtering && (
             <button className="link-btn small" onClick={() => set({ q: "", phase: "", status: "", priority: "", assignee: "", tag: "" })}>
               Clear

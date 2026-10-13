@@ -291,7 +291,7 @@ export function ProgressBar({ value, label, className, ...rest }: { value: numbe
   const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
   return (
     <span className={className ? `progress ${className}` : "progress"} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct} aria-label={label} title={`${label}: ${pct}%`} {...rest}>
-      <span style={{ width: `${pct}%` }} />
+      {pct > 0 && <span style={{ width: `${pct}%` }} />}
     </span>
   );
 }

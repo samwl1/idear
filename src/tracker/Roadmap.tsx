@@ -149,6 +149,7 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
         className="phase"
         aria-label={phase?.name ?? "No phase"}
         data-phase-drop={phase?.id ?? NO_PHASE}
+        data-closed={closed || undefined}
         data-drop-target={(drag && target === (phase?.id ?? NO_PHASE)) || undefined}
       >
         <header className="phase-head">
@@ -167,7 +168,11 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
               <span style={{ width: `${pct}%` }} />
             </span>
             {done}/{total}
-            {closed && <span className="muted"> closed</span>}
+            {closed && (
+              <span className="phase-closed">
+                <Icon name="check" /> Closed
+              </span>
+            )}
           </span>
           {phase && (
             <span className="phase-dates">

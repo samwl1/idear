@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { NodeSelection } from "@tiptap/pm/state";
 import { Placeholder } from "@tiptap/extensions";
 import { Extension } from "@tiptap/core";
+import { TextSelection } from "@tiptap/pm/state";
 import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -61,6 +62,42 @@ const TabKey = Extension.create({
     };
   },
 });
+/**
+ * Alt+Up and Alt+Down move the top-level block the cursor is in (a paragraph,
+ * heading, list, panel, expand, code block, table…) past its neighbour.
+ */
+const MoveBlock = Extension.create({
+  name: "moveBlock",
+  addKeyboardShortcuts() {
+    const move =
+      (dir: -1 | 1) =>
+      ({ editor }: { editor: Editor }) => {
+        const { state } = editor;
+        const { $from, $to } = state.selection;
+        // The top-level block holding the selection; a selection across blocks stays put.
+        const index = $from.index(0);
+        if ($to.index(0) !== index) return false;
+        const doc = state.doc;
+        const target = index + dir;
+        if (target < 0 || target >= doc.childCount) return false;
+        const block = doc.child(index);
+        const other = doc.child(target);
+        const first = Math.min(index, target);
+        let from = 0;
+        for (let i = 0; i < first; i++) from += doc.child(i).nodeSize;
+        // Swap the two neighbours in one replace, then put the cursor back inside the moved block.
+        const oldStart = dir === 1 ? from : from + other.nodeSize;
+        const newStart = dir === 1 ? from + other.nodeSize : from;
+        const offset = $from.pos - oldStart;
+        const tr = state.tr.replaceWith(from, from + block.nodeSize + other.nodeSize, dir === 1 ? [other, block] : [block, other]);
+        tr.setSelection(TextSelection.near(tr.doc.resolve(Math.min(newStart + offset, tr.doc.content.size))));
+        editor.view.dispatch(tr.scrollIntoView());
+        return true;
+      };
+    return { "Alt-ArrowUp": move(-1), "Alt-ArrowDown": move(1) };
+  },
+});
+
 const safe = (c: unknown) => (typeof c === "string" && SAFE_COLOR.test(c.trim()) ? c.trim() : null);
 
 type MdHelpers = { renderChildren: (node: unknown) => string };
@@ -168,7 +205,7 @@ export function MarkdownEditor({
       TableRow,
       TableHeader.extend({ content: "paragraph+" }),
       TableCell.extend({ content: "paragraph+" }),
-      ...(canEdit ? [SlashCommand.configure({ page: page ?? null }), TabKey] : []),
+      ...(canEdit ? [SlashCommand.configure({ page: page ?? null }), TabKey, MoveBlock] : []),
       // The slash menu is how blocks get inserted; say so on the empty line the cursor is on.
       Placeholder.configure({
         placeholder: ({ editor: e }) => (e.isEmpty ? "Write, or type / to insert a block" : "Type / to insert a block"),

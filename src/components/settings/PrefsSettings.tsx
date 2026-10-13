@@ -1,4 +1,4 @@
-import { ACCENTS, DEFAULTS, ZOOMS, resetPrefs, setPrefs, usePrefs, type Accent, type Prefs } from "../../lib/prefs";
+import { ACCENTS, DEFAULTS, MARGIN_MAX, MARGIN_MIN, ZOOMS, resetPrefs, setPrefs, usePrefs, type Accent, type Prefs } from "../../lib/prefs";
 import { Field, Segmented, Toggle } from "./controls";
 import { THEMES } from "../../lib/themes";
 import { openWithApp, setOpenWithApp } from "../../lib/git";
@@ -50,7 +50,7 @@ function TextSize({ p }: { p: Prefs }) {
   );
 }
 
-const APPEARANCE: (keyof Prefs)[] = ["theme", "accent", "zoom", "density", "readingFont", "width"];
+const APPEARANCE: (keyof Prefs)[] = ["theme", "accent", "zoom", "density", "readingFont", "width", "margin", "align"];
 const ACCESS: (keyof Prefs)[] = ["motion", "contrast", "focus", "underlineLinks", "readableFont"];
 
 function isDefault(p: Prefs, keys: (keyof Prefs)[]) {
@@ -127,7 +127,7 @@ export function AppearanceSettings() {
             onChange={(readingFont) => setPrefs({ readingFont })}
           />
         </Field>
-        <Field label="Note width" hint="How wide a line of text can get.">
+        <Field label="Note width" hint="How wide a line of text can get. Full uses the whole window.">
           <Segmented
             label="Note width"
             value={p.width}
@@ -135,10 +135,40 @@ export function AppearanceSettings() {
               { value: "narrow", label: "Narrow" },
               { value: "normal", label: "Normal" },
               { value: "wide", label: "Wide" },
+              { value: "full", label: "Full" },
             ]}
             onChange={(width) => setPrefs({ width })}
           />
         </Field>
+        {p.width !== "full" && (
+          <Field label="Alignment" hint="Where the note sits when the window is wider than it.">
+            <Segmented
+              label="Note alignment"
+              value={p.align}
+              options={[
+                { value: "center", label: "Centered" },
+                { value: "left", label: "Left" },
+              ]}
+              onChange={(align) => setPrefs({ align })}
+            />
+          </Field>
+        )}
+        {p.width === "full" && (
+          <Field label="Margins" hint="Space on each side of a full-width note.">
+            <span className="range-field">
+              <input
+                type="range"
+                aria-label="Note margins"
+                min={MARGIN_MIN}
+                max={MARGIN_MAX}
+                step={0.5}
+                value={p.margin}
+                onChange={(e) => setPrefs({ margin: Number(e.target.value) })}
+              />
+              <span className="range-value">{p.margin}rem</span>
+            </span>
+          </Field>
+        )}
       </section>
 
       <section className="card">

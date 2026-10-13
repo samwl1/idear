@@ -18,8 +18,12 @@ export interface Prefs {
   density: "comfortable" | "compact";
   /** Typeface for notes and help. */
   readingFont: "serif" | "sans";
-  /** How wide notes run. */
-  width: "narrow" | "normal" | "wide";
+  /** How wide notes run. "full" fills the window, leaving `margin` on each side. */
+  width: "narrow" | "normal" | "wide" | "full";
+  /** Side margins for full-width notes, in rem. */
+  margin: number;
+  /** Where a capped-width note sits in the window. Full width has no choice to make. */
+  align: "center" | "left";
   motion: "system" | "reduce";
   contrast: "normal" | "more";
   focus: "normal" | "strong";
@@ -29,6 +33,9 @@ export interface Prefs {
 }
 
 export const ZOOMS = [0.85, 0.9, 1, 1.1, 1.25, 1.4, 1.6];
+/** Range of the full-width note margin, in rem. */
+export const MARGIN_MIN = 1;
+export const MARGIN_MAX = 16;
 
 export const DEFAULTS: Prefs = {
   theme: "system",
@@ -37,6 +44,8 @@ export const DEFAULTS: Prefs = {
   density: "comfortable",
   readingFont: "serif",
   width: "normal",
+  margin: 3.5,
+  align: "center",
   motion: "system",
   contrast: "normal",
   focus: "normal",
@@ -55,6 +64,9 @@ function load(): Prefs {
     if (!THEME_IDS.includes(p.theme)) p.theme = DEFAULTS.theme;
     if (!ACCENTS.includes(p.accent)) p.accent = DEFAULTS.accent;
     if (!ZOOMS.includes(p.zoom)) p.zoom = DEFAULTS.zoom;
+    if (!["narrow", "normal", "wide", "full"].includes(p.width)) p.width = DEFAULTS.width;
+    if (!["center", "left"].includes(p.align)) p.align = DEFAULTS.align;
+    if (typeof p.margin !== "number" || !(p.margin >= MARGIN_MIN && p.margin <= MARGIN_MAX)) p.margin = DEFAULTS.margin;
     return p;
   } catch {
     return { ...DEFAULTS };
@@ -78,6 +90,8 @@ function apply() {
   el.density = prefs.density;
   el.reading = prefs.readingFont;
   el.width = prefs.width;
+  el.align = prefs.align;
+  document.documentElement.style.setProperty("--note-margin", `${prefs.margin}rem`);
   el.motion = prefs.motion;
   el.contrast = prefs.contrast;
   el.focus = prefs.focus;
