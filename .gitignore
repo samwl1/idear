@@ -4,3 +4,5 @@ target/
 src-tauri/gen/
 *.am.tmp
 public/excalidraw/
+.DS_Store
+**/.DS_Store
