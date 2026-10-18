@@ -1,4 +1,5 @@
 import { ACCENTS, DEFAULTS, MARGIN_MAX, MARGIN_MIN, ZOOMS, resetPrefs, setPrefs, usePrefs, type Accent, type Prefs } from "../../lib/prefs";
+import { ACCENTS, DEFAULTS, MARGIN_MAX, MARGIN_MIN, ZOOMS, resetPrefs, setPrefs, usePrefs, type Accent, type Prefs } from "../../lib/prefs";
 import { Field, Segmented, Toggle } from "./controls";
 import { THEMES } from "../../lib/themes";
 import { openWithApp, setOpenWithApp } from "../../lib/git";

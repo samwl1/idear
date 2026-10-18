@@ -3,6 +3,7 @@ import { NodeSelection } from "@tiptap/pm/state";
 import { Placeholder } from "@tiptap/extensions";
 import { Extension } from "@tiptap/core";
 import { TextSelection } from "@tiptap/pm/state";
+import { TextSelection } from "@tiptap/pm/state";
 import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";

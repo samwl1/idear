@@ -53,12 +53,15 @@ from the Insert button or by typing `/`.
   neighbour: a paragraph, heading, list, panel, expand, code block, or table. Inserted blocks
   (panels, expands, code, images, contents, child pages) also show a ⋮⋮ grip at their left edge
   on hover; drag it to put the block anywhere in the note.
+- **Moving blocks:** Alt+↑ and Alt+↓ (Option on a Mac) move the block the cursor is in past its
+  neighbour: a paragraph, heading, list, panel, expand, code block, or table. Inserted blocks
+  (panels, expands, code, images, contents, child pages) also show a ⋮⋮ grip at their left edge
+  on hover; drag it to put the block anywhere in the note.
 - **Links:** Cmd+click (Ctrl+click on Linux) opens a link in your browser; a plain click edits it.
   Only http, https, and mailto links leave the app.
 - **Width:** Settings → Appearance → Note width. Narrow, Normal, and Wide cap the line length,
   and **Alignment** puts the note in the middle of the window or against its left edge; **Full**
-  uses the whole window, with a Margins slider: centered keeps the margin on both sides, left
-  keeps it on the left only and the text runs to the window's edge. Per device.
+  uses the whole window, with a Margins slider for the space on each side. Per device.
 - **On this page:** once a note has a heading, its outline sits to the right of the text. The
   section you're reading is marked as you scroll; click a heading to jump to it. The arrow in its
   title folds it to a strip of ticks (one per heading, still clickable); the choice is remembered
