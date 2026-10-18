@@ -75,8 +75,15 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
   const canEdit = useCanEdit();
   const me = useAccount().account?.name ?? "";
   const ctx = useContextMenu();
-  const [prefs, setPrefs] = useState<Prefs>(() => loadPrefs(ops.id));
+  const [stored, setPrefs] = useState<Prefs>(() => loadPrefs(ops.id));
   const set = (patch: Partial<Prefs>) => setPrefs((p) => ({ ...p, ...patch }));
+  // A remembered phase or column that's since been deleted would match
+  // nothing while the select shows "Any": treat it as cleared.
+  const prefs = useMemo<Prefs>(() => {
+    const phaseOk = stored.phase === "" || stored.phase === "none" || view.phases.some((p) => p.id === stored.phase);
+    const statusOk = stored.status === "" || stored.status === BACKLOG || view.columns.some((c) => c.id === stored.status);
+    return phaseOk && statusOk ? stored : { ...stored, phase: phaseOk ? stored.phase : "", status: statusOk ? stored.status : "" };
+  }, [stored, view]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   /** Where a shift-click range starts. */
   const anchor = useRef<string | null>(null);
@@ -84,11 +91,11 @@ export function Tasks({ workspace, view, ops, openTask, onOpenTask, onError }: P
 
   useEffect(() => {
     try {
-      localStorage.setItem(`tasks:${ops.id}`, JSON.stringify(prefs));
+      localStorage.setItem(`tasks:${ops.id}`, JSON.stringify(stored));
     } catch {
       // storage unavailable: the tab just won't be remembered
     }
-  }, [ops.id, prefs]);
+  }, [ops.id, stored]);
 
   // Drop selections of tasks that no longer exist.
   useEffect(() => {
