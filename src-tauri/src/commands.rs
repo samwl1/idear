@@ -412,9 +412,24 @@ pub async fn git_branches(path: Option<String>, url: Option<String>) -> CmdResul
         return Ok(GitBranches { branches: out.into_iter().collect(), source: "local", error: None });
     }
     let Some(url) = url else { return Err("path or url required".into()) };
+    // The URL comes from the shared project doc, so any member wrote it. Only
+    // plain web URLs run, never as an option, and git may not switch transports.
+    let trimmed = url.trim().to_string();
+    let web = trimmed.len() < 2048
+        && (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+        && !trimmed.chars().any(|c| c.is_control() || c.is_whitespace());
+    if !web {
+        return Ok(GitBranches {
+            branches: Vec::new(),
+            source: "remote",
+            error: Some("Only http(s) repository URLs can be checked from here.".into()),
+        });
+    }
     let run = tauri::async_runtime::spawn_blocking(move || {
         std::process::Command::new("git")
-            .args(["ls-remote", "--heads", &url])
+            .args(["-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.http.allow=always"])
+            .args(["-c", "core.askPass=", "-c", "credential.helper="])
+            .args(["ls-remote", "--heads", "--", &trimmed])
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
     })

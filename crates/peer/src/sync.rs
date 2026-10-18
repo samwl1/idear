@@ -311,11 +311,20 @@ impl SyncCtx {
     /// Membership records to open a session with: your own, to prove your
     /// access, and the other person's, so they learn a new role (like being
     /// restored after removal) even while their copy would refuse you.
-    fn proofs(&self, peer_user: Option<&str>) -> Res<Vec<MemberRecord>> {
+    ///
+    /// Only workspaces the other side is already part of are mentioned. The
+    /// Intro goes out before anyone is authorized, so a stranger must not
+    /// learn which workspaces you are in from it. `device` is who we are
+    /// talking to; `peer_user` is who we expect that to be, when known.
+    fn proofs(&self, peer_user: Option<&str>, device: &str) -> Res<Vec<MemberRecord>> {
         self.with_workspaces(|open, ids, own| {
             Ok(ids
                 .iter()
                 .filter_map(|id| open.get(id).and_then(|w| w.members()))
+                .filter(|m| {
+                    m.device_has_access(device, own)
+                        || peer_user.is_some_and(|u| m.role(u).is_some())
+                })
                 .flat_map(|m| {
                     m.records
                         .iter()
@@ -416,10 +425,16 @@ impl SyncCtx {
             if incoming.workspace != s.summary.id {
                 continue;
             }
+            let known = open.contains_key(&s.summary.id) || self.root.join(&s.summary.id).exists();
             let local = match open.get(&s.summary.id) {
                 Some(ws) => ws.members().cloned(),
                 None => Workspace::open(&self.root, &s.summary.id).ok().and_then(|w| w.members().cloned()),
             };
+            // A copy we already hold without membership records is one this
+            // account made before sharing existed: it is ours, whatever the
+            // sender's records say. Only a workspace new to this device takes
+            // the sender's word, and then only from its owner (checked below).
+            let local = local.or_else(|| known.then(|| Members::new(&s.summary.id, &own)));
             let effective = match local {
                 Some(mut l) => {
                     if l.merge(&incoming).is_err() {
@@ -434,7 +449,6 @@ impl SyncCtx {
                 Peer::Other(ids) => {
                     let they = effective.role(&ids.user).is_some_and(Role::has_access);
                     let me = effective.role(&own.user).is_some_and(Role::has_access);
-                    let known = open.contains_key(&s.summary.id) || self.root.join(&s.summary.id).exists();
                     // A workspace new to this device only comes from its owner, for an invite we redeemed.
                     let invited = self
                         .joins
@@ -743,13 +757,13 @@ pub async fn run_initiator(
     join: Option<JoinRequest>,
 ) -> Res<Applied> {
     let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
-    let proofs = { let c = ctx.clone(); blocking(move || c.proofs(peer_user.as_deref())).await? };
+    let device = hex::encode(conn.remote_id().as_bytes());
+    let proofs = { let (c, d) = (ctx.clone(), device.clone()); blocking(move || c.proofs(peer_user.as_deref(), &d)).await? };
     write_frame(&mut send, &Intro { identity: ctx.own()?, join, proofs }).await?;
     let theirs = match read_frame::<Reply>(&mut recv, INTRO_LIMIT).await? {
         Reply::Welcome(intro) => intro,
         Reply::Refused(reason) => return Err(reason),
     };
-    let device = hex::encode(conn.remote_id().as_bytes());
     let (peer, identity_changed) = ctx.authorize(&device, &theirs.identity)?;
     let learned = learn_proofs(ctx, &peer, theirs.proofs).await?;
     let (shared, removed) = { let (c, p) = (ctx.clone(), peer.clone()); blocking(move || c.shared_with(&p)).await? };
@@ -803,7 +817,7 @@ pub async fn run_responder(ctx: &SyncCtx, conn: Connection) -> Res<(String, Appl
         Peer::Own => None,
         Peer::Other(theirs) => Some(theirs.user.clone()),
     };
-    let proofs = { let c = ctx.clone(); blocking(move || c.proofs(peer_user.as_deref())).await? };
+    let proofs = { let (c, d) = (ctx.clone(), device.clone()); blocking(move || c.proofs(peer_user.as_deref(), &d)).await? };
     write_frame(&mut send, &Reply::Welcome(Intro { identity: ctx.own()?, join: None, proofs })).await?;
     let mut applied = exchange(ctx, peer, shared, removed, &mut send, &mut recv).await?;
     applied.identity_changed |= identity_changed;
