@@ -30,7 +30,7 @@ export async function popOut(workspace: string, id: string, title: string) {
     return;
   }
   const url = `${window.location.pathname}#pop/${encodeURIComponent(workspace)}/${encodeURIComponent(id)}`;
-  const w = new WebviewWindow(label, { url, title: title || "idear", width: 960, height: 720, minWidth: 480, minHeight: 360 });
+  const w = new WebviewWindow(label, { url, title: title || "idear", width: 960, height: 720, minWidth: 320, minHeight: 240 });
   await new Promise<void>((resolve, reject) => {
     w.once("tauri://created", () => resolve());
     w.once("tauri://error", (e) => reject(new Error(String(e.payload ?? "Couldn't open a window"))));
