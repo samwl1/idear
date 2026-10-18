@@ -15,6 +15,7 @@ import { TrackerPage } from "../tracker/TrackerPage";
 import type { TrackerDoc } from "../tracker/model";
 import { useCanEdit } from "../lib/access";
 import { showToast } from "../lib/toast";
+import { pageLinksIn } from "../editor/pagelink";
 
 interface Props {
   session: WorkspaceSession;
@@ -296,7 +297,18 @@ function NoteBody({
       toolbar={false}
       onEditor={onEditor}
       onChange={(md) =>
-        session.changeItem<Note>(id, "edit", (d) => A.updateText(d, ["body"], md)).catch(onError)
+        session
+          .changeItem<Note>(id, "edit", (d) => {
+            A.updateText(d, ["body"], md);
+            // Pages linked inline count as references too, so they show up
+            // under References here and under "attached" on the other page.
+            for (const target of pageLinksIn(md)) {
+              if (target === id || !session.node(target)) continue;
+              if (!d.links) d.links = [];
+              if (!d.links.includes(target)) d.links.push(target);
+            }
+          })
+          .catch(onError)
       }
     />
   );

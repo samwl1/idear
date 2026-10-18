@@ -35,6 +35,8 @@ keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
+# Spell check lives in the WebKitGTK context; macOS gets it from WebKit itself.
+webkit2gtk = { version = "2", features = ["v2_40"] }
 
 [dev-dependencies]
 automerge = "0.12"

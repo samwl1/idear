@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use automerge::{Automerge, ReadDoc, ROOT};
-use notes_core::docs::{get_map, get_string, get_string_list};
+use notes_core::docs::{get_bool, get_i64, get_map, get_string, get_string_list};
 use notes_core::index::{TreeNode, ViewQuery};
 use notes_core::members::Role;
 use serde_json::{json, Value};
@@ -48,7 +48,7 @@ pub fn list() -> Value {
         },
         {
             "name": "read_page",
-            "description": "Read a page: a note's markdown, a project's columns and tasks, or a whiteboard's text. Also lists where it sits and the pages inside it.",
+            "description": "Read a page: a note's markdown, a project's columns and tasks, or a whiteboard's shapes, their text, and what the arrows connect. Also lists where it sits and the pages inside it. In note markdown, [Title](page:<id>) is a link to another page in the workspace; read it with its id.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "workspace": ws, "page": { "type": "string", "description": "Page id, or its exact title." } },
@@ -58,15 +58,20 @@ pub fn list() -> Value {
         },
         {
             "name": "list_tasks",
-            "description": "Tasks across a workspace's projects, filtered by project, status, assignee, or text.",
+            "description": "Tasks across a workspace's projects, with their status, priority, due date, phase, assignee, and tags. Filter by any of those; archived tasks are left out unless asked for.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "workspace": ws,
                     "project": { "type": "string", "description": "Project id or title." },
                     "status": { "type": "array", "items": { "enum": ["todo", "doing", "done"] } },
-                    "assignee": { "type": "string", "description": "Name; * matches anything." },
-                    "text": { "type": "string" }
+                    "assignee": { "type": "string", "description": "Name, case-insensitive; * matches anything, and \"\" (empty) means unassigned." },
+                    "text": { "type": "string", "description": "Words in the title or description." },
+                    "phase": { "type": "string", "description": "Phase name or id, or \"none\" for tasks outside any phase." },
+                    "priority": { "type": "array", "items": { "enum": ["urgent", "high", "medium", "low", "none"] } },
+                    "due": { "type": "string", "description": "\"overdue\", \"today\", \"week\" (within 7 days), \"any\" (has a date), \"none\" (no date), or a YYYY-MM-DD date: tasks due on or before it." },
+                    "tag": { "type": "string", "description": "A tag the task has; * globs." },
+                    "include_archived": { "type": "boolean", "description": "Also list archived tasks (shown as done). Default false." }
                 },
                 "required": ["workspace"]
             },
@@ -74,7 +79,7 @@ pub fn list() -> Value {
         },
         {
             "name": "create_page",
-            "description": "Create a note, optionally inside a folder or another page. Editors only. Markdown supports the app's macros: ```lang code blocks, :::panel {type=\"info|note|warning|success|error\"} ... ::: panels, :::expand {title=\"...\"} ... ::: expands, :::children ::: and :::toc :::.",
+            "description": "Create a note, optionally inside a folder or another page. Editors only. Link to another page with [Its title](page:<its id>). Markdown supports the app's macros: ```lang code blocks, :::panel {type=\"info|note|warning|success|error\"} ... ::: panels, :::expand {title=\"...\"} ... ::: expands, :::children ::: and :::toc :::.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -377,6 +382,24 @@ fn read_page(peer: &Peer, args: &Value) -> Res<String> {
             out.push_str("\n---\n");
             out.push_str(if body.trim().is_empty() { "(empty note)" } else { &body });
             out.push('\n');
+            // Inline links by their current titles, since the link text can go stale.
+            let mut linked = Vec::new();
+            for (i, _) in body.match_indices("](page:") {
+                let rest = &body[i + 7..];
+                let Some(end) = rest.find(')') else { continue };
+                let id = &rest[..end];
+                if let Some(n) = by_id.get(id) {
+                    let line = format!("- {} (id {})", or(&n.title, "Untitled"), n.id);
+                    if !linked.contains(&line) {
+                        linked.push(line);
+                    }
+                }
+            }
+            if !linked.is_empty() {
+                out.push_str("\nLinks to pages:\n");
+                out.push_str(&linked.join("\n"));
+                out.push('\n');
+            }
         }
         "tracker" => {
             let doc = load(peer, &ws_id, &node.id)?;
@@ -424,23 +447,7 @@ fn read_page(peer: &Peer, args: &Value) -> Res<String> {
         }
         "whiteboard" => {
             let doc = load(peer, &ws_id, &node.id)?;
-            let mut texts = Vec::new();
-            if let Some(els) = get_map(&doc, &ROOT, "elements").map_err(err)? {
-                for key in doc.keys(&els).collect::<Vec<_>>() {
-                    if let Some(el) = get_map(&doc, &els, &key).map_err(err)? {
-                        if let Some(t) = get_string(&doc, &el, "text").map_err(err)?.filter(|t| !t.trim().is_empty()) {
-                            texts.push(t);
-                        }
-                    }
-                }
-            }
-            out.push_str("\nText on the board:\n");
-            if texts.is_empty() {
-                out.push_str("(none)\n");
-            }
-            for t in texts {
-                out.push_str(&format!("- {}\n", t.replace('\n', " ")));
-            }
+            out.push_str(&whiteboard_structure(&doc, &nodes)?);
         }
         _ => {}
     }
@@ -456,27 +463,280 @@ fn read_page(peer: &Peer, args: &Value) -> Res<String> {
     Ok(out)
 }
 
+/// What's on a whiteboard and how it's connected: shapes with their text and
+/// position, arrows by what they join, cards by the page they point at.
+/// Reading order is top to bottom, then left to right, so a flowchart reads
+/// roughly as drawn.
+fn whiteboard_structure(doc: &Automerge, nodes: &[TreeNode]) -> Res<String> {
+    struct El {
+        id: String,
+        kind: String,
+        text: String,
+        x: i64,
+        y: i64,
+        w: i64,
+        h: i64,
+        start: Option<String>,
+        end: Option<String>,
+        line: bool,
+        target: Option<String>,
+        groups: Vec<String>,
+    }
+    let mut els = Vec::new();
+    if let Some(root) = get_map(doc, &ROOT, "elements").map_err(err)? {
+        for key in doc.keys(&root).collect::<Vec<_>>() {
+            let Some(el) = get_map(doc, &root, &key).map_err(err)? else { continue };
+            let kind = get_string(doc, &el, "type").map_err(err)?.unwrap_or_default();
+            let num = |k: &str| get_i64(doc, &el, k).ok().flatten().unwrap_or(0);
+            let bound = |end: &str| -> Res<Option<String>> {
+                let Some(t) = get_map(doc, &el, end).map_err(err)? else { return Ok(None) };
+                let Some(b) = get_map(doc, &t, "bind").map_err(err)? else { return Ok(None) };
+                get_string(doc, &b, "id").map_err(err)
+            };
+            els.push(El {
+                id: key.clone(),
+                text: get_string(doc, &el, "text").map_err(err)?.unwrap_or_default(),
+                x: num("x"),
+                y: num("y"),
+                w: num("w"),
+                h: num("h"),
+                start: bound("start")?,
+                end: bound("end")?,
+                line: get_bool(doc, &el, "line").map_err(err)?.unwrap_or(false),
+                target: get_string(doc, &el, "ref").map_err(err)?,
+                groups: get_string_list(doc, &el, "groups").map_err(err)?,
+                kind,
+            });
+        }
+    }
+    // Rows of about 40px, left to right within a row.
+    els.sort_by_key(|e| (e.y.div_euclid(40), e.x));
+    let by_id: BTreeMap<&str, &El> = els.iter().map(|e| (e.id.as_str(), e)).collect();
+    let short = |id: &str| id.chars().take(8).collect::<String>();
+    let name = |id: &str| -> String {
+        match by_id.get(id) {
+            Some(e) if !e.text.trim().is_empty() => format!("\"{}\"", e.text.replace('\n', " ").trim()),
+            Some(e) => format!("{} {}", e.kind, short(id)),
+            None => format!("element {}", short(id)),
+        }
+    };
+    let page_title = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| or(&n.title, "Untitled").to_string());
+
+    let mut out = String::new();
+    let shapes = els.iter().filter(|e| e.kind != "arrow").count();
+    let arrows = els.len() - shapes;
+    out.push_str(&format!("\nOn the board: {shapes} shape{} and {arrows} connector{}.\n", if shapes == 1 { "" } else { "s" }, if arrows == 1 { "" } else { "s" }));
+    if els.is_empty() {
+        return Ok(out);
+    }
+    out.push_str("Elements, top to bottom (id, kind, text, position, size):\n");
+    for e in els.iter().filter(|e| e.kind != "arrow") {
+        let text = if e.text.trim().is_empty() { String::new() } else { format!(" \"{}\"", e.text.replace('\n', " / ").trim()) };
+        let size = if e.w > 0 || e.h > 0 { format!(" {}×{}", e.w, e.h) } else { String::new() };
+        let what = match e.kind.as_str() {
+            "card" => match e.target.as_deref().and_then(page_title) {
+                Some(t) => format!(" → page \"{t}\" (id {})", e.target.clone().unwrap_or_default()),
+                None => format!(" → {}", e.target.clone().unwrap_or_default()),
+            },
+            "freehand" => " drawing".to_string(),
+            _ => String::new(),
+        };
+        out.push_str(&format!("- {} {}{text}{what} at ({}, {}){size}\n", short(&e.id), e.kind, e.x, e.y));
+    }
+    let connectors: Vec<_> = els.iter().filter(|e| e.kind == "arrow").collect();
+    if !connectors.is_empty() {
+        out.push_str("Connections:\n");
+        for a in connectors {
+            let from = a.start.as_deref().map(name).unwrap_or_else(|| format!("({}, {})", a.x, a.y));
+            let to = a.end.as_deref().map(name).unwrap_or_else(|| "a free point".to_string());
+            let label = if a.text.trim().is_empty() { String::new() } else { format!(" labelled \"{}\"", a.text.trim()) };
+            out.push_str(&format!("- {from} {} {to}{label}\n", if a.line { "—" } else { "→" }));
+        }
+    }
+    let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for e in &els {
+        for g in &e.groups {
+            groups.entry(g.as_str()).or_default().push(name(&e.id));
+        }
+    }
+    if !groups.is_empty() {
+        out.push_str("Grouped together:\n");
+        for members in groups.values() {
+            out.push_str(&format!("- {}\n", members.join(", ")));
+        }
+    }
+    Ok(out)
+}
+
 fn list_tasks(peer: &Peer, args: &Value) -> Res<String> {
     let ws_id = peer.resolve_workspace(need(args, "workspace")?)?;
+    let nodes = peer.with_ws(&ws_id, |ws| ws.tree().map_err(err))?;
     let project = match arg(args, "project") {
         Some(p) => Some(resolve_project(peer, &ws_id, p)?.id),
         None => None,
     };
-    let mut q = query(vec!["task".into()], arg(args, "text").unwrap_or(""));
-    q.statuses = strings(args, "status").unwrap_or_default();
-    q.assignee = arg(args, "assignee").unwrap_or("").to_string();
-    let rows = peer.with_ws(&ws_id, |ws| ws.query(&q).map_err(err))?;
-    let mut out = String::new();
-    for r in rows.iter().filter(|r| project.is_none() || r.tracker == project) {
-        out.push_str(&format!(
-            "- {} {} ({}, project \"{}\")\n",
-            r.key.as_deref().unwrap_or("?"),
-            or(&r.title, "Untitled task"),
-            r.status.as_deref().unwrap_or("?"),
-            r.tracker_title.as_deref().unwrap_or("?"),
-        ));
+    let statuses = strings(args, "status").unwrap_or_default();
+    let priorities = strings(args, "priority").unwrap_or_default();
+    let assignee = arg(args, "assignee");
+    let text = arg(args, "text").map(str::to_lowercase).filter(|t| !t.trim().is_empty());
+    let phase = arg(args, "phase").map(str::trim).filter(|p| !p.is_empty());
+    let due = arg(args, "due").map(str::trim).filter(|d| !d.is_empty());
+    let tag = arg(args, "tag").map(str::trim).filter(|t| !t.is_empty());
+    let include_archived = args.get("include_archived").and_then(Value::as_bool).unwrap_or(false);
+    let today = today_iso();
+    let week = plus_days(&today, 7);
+    if let Some(d) = due {
+        if !matches!(d, "overdue" | "today" | "week" | "any" | "none") && !is_iso_date(d) {
+            return Err("due must be overdue, today, week, any, none, or a YYYY-MM-DD date.".into());
+        }
     }
-    Ok(if out.is_empty() { "No tasks match.".into() } else { format!("{UNTRUSTED}\n{out}") })
+
+    let mut out = String::new();
+    let mut count = 0;
+    for node in nodes.iter().filter(|n| n.kind == "tracker" && project.as_ref().is_none_or(|p| *p == n.id)) {
+        let doc = load(peer, &ws_id, &node.id)?;
+        let t = Tracker::read(&doc)?;
+        let phase_id = match phase {
+            None | Some("none") => None,
+            Some(p) => t.phases.iter().find(|x| x.0 == p || x.1.trim().eq_ignore_ascii_case(p)).map(|x| x.0.clone()),
+        };
+        if phase.is_some_and(|p| p != "none") && phase_id.is_none() {
+            continue; // this project has no such phase
+        }
+        let mut tasks: Vec<&docs::Task> = t
+            .tasks
+            .iter()
+            .filter(|x| include_archived || !x.archived)
+            .filter(|x| statuses.is_empty() || statuses.iter().any(|s| s == t.status_of(x)))
+            .filter(|x| priorities.is_empty() || priorities.iter().any(|p| p == if x.priority.is_empty() { "none" } else { &x.priority }))
+            .filter(|x| match assignee {
+                None | Some("*") => true,
+                Some("") => x.assignee.trim().is_empty(),
+                Some(a) => glob_eq(a, &x.assignee),
+            })
+            .filter(|x| text.as_ref().is_none_or(|q| x.title.to_lowercase().contains(q.as_str()) || x.description.to_lowercase().contains(q.as_str())))
+            .filter(|x| match phase {
+                None => true,
+                Some("none") => x.phase.is_empty(),
+                Some(_) => phase_id.as_deref() == Some(x.phase.as_str()),
+            })
+            .filter(|x| match due {
+                None => true,
+                Some("any") => !x.due.is_empty(),
+                Some("none") => x.due.is_empty(),
+                Some("overdue") => !x.due.is_empty() && x.due.as_str() < today.as_str() && t.status_of(x) != "done",
+                Some("today") => x.due == today,
+                Some("week") => !x.due.is_empty() && x.due.as_str() >= today.as_str() && x.due.as_str() <= week.as_str(),
+                Some(d) => !x.due.is_empty() && x.due.as_str() <= d,
+            })
+            .filter(|x| tag.is_none_or(|g| x.tags.iter().any(|tg| glob_eq(g, tg))))
+            .collect();
+        // Due soonest first, then by priority, then board order.
+        let rank = |p: &str| match p {
+            "urgent" => 0,
+            "high" => 1,
+            "medium" => 2,
+            "low" => 3,
+            _ => 4,
+        };
+        tasks.sort_by(|a, b| {
+            let da = if a.due.is_empty() { "~" } else { a.due.as_str() };
+            let db = if b.due.is_empty() { "~" } else { b.due.as_str() };
+            da.cmp(db).then(rank(&a.priority).cmp(&rank(&b.priority))).then(a.order.cmp(&b.order))
+        });
+        if tasks.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n## {} (id {})\n", or(&t.title, "Untitled project"), node.id));
+        for x in tasks {
+            count += 1;
+            let mut meta = vec![t.status_of(x).to_string()];
+            if x.archived {
+                meta.push("archived".into());
+            }
+            if !x.priority.is_empty() && x.priority != "none" {
+                meta.push(x.priority.clone());
+            }
+            if !x.due.is_empty() {
+                meta.push(format!("due {}{}", x.due, if x.due.as_str() < today.as_str() && t.status_of(x) != "done" { ", overdue" } else { "" }));
+            }
+            if let Some((_, name, _)) = t.phases.iter().find(|p| p.0 == x.phase) {
+                meta.push(format!("phase {name}"));
+            }
+            if !x.assignee.trim().is_empty() {
+                meta.push(format!("@{}", x.assignee.trim()));
+            }
+            if !x.tags.is_empty() {
+                meta.push(format!("tags {}", x.tags.join(", ")));
+            }
+            if let Some(parent) = t.tasks.iter().find(|p| p.id == x.parent) {
+                meta.push(format!("subtask of {}", t.key(parent)));
+            }
+            out.push_str(&format!("- {} {} ({})\n", t.key(x), or(&x.title, "Untitled task"), meta.join("; ")));
+        }
+    }
+    Ok(if count == 0 { "No tasks match.".into() } else { format!("{UNTRUSTED}\n{count} task{}:{out}", if count == 1 { "" } else { "s" }) })
+}
+
+/// `*` matches any run of characters; otherwise case-insensitive equality.
+fn glob_eq(pattern: &str, value: &str) -> bool {
+    let (p, v) = (pattern.trim().to_lowercase(), value.trim().to_lowercase());
+    if !p.contains('*') {
+        return p == v;
+    }
+    let parts: Vec<&str> = p.split('*').collect();
+    let mut rest = v.as_str();
+    for (i, part) in parts.iter().enumerate() {
+        if i == 0 {
+            let Some(r) = rest.strip_prefix(part) else { return false };
+            rest = r;
+        } else if i == parts.len() - 1 {
+            return rest.ends_with(part);
+        } else if let Some(at) = rest.find(part) {
+            rest = &rest[at + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_iso_date(s: &str) -> bool {
+    s.len() == 10 && s.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() })
+}
+
+/// Today's date, UTC, as YYYY-MM-DD.
+fn today_iso() -> String {
+    days_to_iso(now() / 86_400_000)
+}
+
+fn plus_days(iso: &str, n: i64) -> String {
+    days_to_iso(iso_to_days(iso) + n)
+}
+
+// Civil-date conversion (Howard Hinnant's algorithms), so no date crate is needed.
+fn days_to_iso(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    format!("{:04}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn iso_to_days(iso: &str) -> i64 {
+    let mut it = iso.split('-').map(|p| p.parse::<i64>().unwrap_or(1));
+    let (y0, m, d) = (it.next().unwrap_or(1970), it.next().unwrap_or(1), it.next().unwrap_or(1));
+    let y = if m <= 2 { y0 - 1 } else { y0 };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 // ---- writes ---------------------------------------------------------------------------
@@ -499,9 +759,10 @@ fn create_page(peer: &Peer, args: &Value) -> Res<String> {
     };
     let id = uuid::Uuid::now_v7().to_string();
     let device = peer.ctx.device.clone();
+    let page_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
     peer.with_ws(&ws_id, |ws| {
         peer.require_edit(ws)?;
-        let note = docs::new_note(title, body)?;
+        let note = docs::new_note(title, body, &page_ids)?;
         ws.create_doc(&device, &id, "note", &note, "note.create").map_err(err)?;
         let manifest = ws.load_doc(notes_core::workspace::MANIFEST).map_err(err)?;
         let change = docs::add_tree_node(&manifest, &id, "note", parent.as_ref().map(|p| p.id.as_str()))?;
@@ -529,6 +790,9 @@ fn update_page(peer: &Peer, args: &Value) -> Res<String> {
     peer.with_ws(&ws_id, |ws| {
         peer.require_edit(ws)?;
         let mut doc = automerge::AutoCommit::load(&ws.load_doc(&node.id).map_err(err)?).map_err(err)?;
+        // Read before writing: document() commits, and a rename plus an
+        // append must land as one change.
+        let current = get_string(doc.document(), &ROOT, "body").map_err(err)?.unwrap_or_default();
         if let Some(t) = title {
             docs::set_text(&mut doc, &ROOT, "title", t)?;
         }
@@ -536,10 +800,11 @@ fn update_page(peer: &Peer, args: &Value) -> Res<String> {
             if replace {
                 docs::set_text(&mut doc, &ROOT, "body", md)?;
             } else {
-                let current = get_string(doc.document(), &ROOT, "body").map_err(err)?.unwrap_or_default();
                 let sep = if current.trim().is_empty() { "" } else if current.ends_with("\n\n") { "" } else if current.ends_with('\n') { "\n" } else { "\n\n" };
                 docs::append_text(&mut doc, &ROOT, "body", &format!("{sep}{md}"))?;
             }
+            let page_ids: Vec<String> = nodes.iter().map(|n| n.id.clone()).collect();
+            docs::add_page_links(&mut doc, md, &page_ids, Some(&node.id))?;
         }
         let action = if markdown.is_some() { "note.edit" } else { "note.rename" };
         let change = docs::last_change(&mut doc)?;
@@ -712,3 +977,30 @@ async fn sync_now(peer: &Peer) -> Res<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+
+    #[test]
+    fn dates_round_trip() {
+        for iso in ["1970-01-01", "2000-02-29", "2026-10-17", "2026-12-31", "2027-03-01"] {
+            assert_eq!(days_to_iso(iso_to_days(iso)), iso);
+        }
+        assert_eq!(plus_days("2026-10-28", 7), "2026-11-04");
+        assert_eq!(plus_days("2024-02-27", 3), "2024-03-01");
+        assert!(is_iso_date("2026-10-17"));
+        assert!(!is_iso_date("17/10/2026"));
+    }
+
+    #[test]
+    fn globs() {
+        assert!(glob_eq("Sam", "sam"));
+        assert!(glob_eq("s*", "Sam Long"));
+        assert!(glob_eq("*long", "Sam Long"));
+        assert!(glob_eq("*", "anything"));
+        assert!(glob_eq("s*g", "Sam Long"));
+        assert!(!glob_eq("s*x", "Sam Long"));
+        assert!(!glob_eq("sam", "sammy"));
+    }
+}

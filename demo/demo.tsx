@@ -157,6 +157,7 @@ const title = document.createElement("div");
 title.id = "demo-title";
 title.innerHTML = `<div style="text-align:center"><h1>idear</h1><p>Notes, whiteboards, and projects. Local-first, peer to peer, end-to-end signed.</p></div>`;
 document.body.appendChild(title);
+(window as any).demoDocs = docs;
 (window as any).demo = {
   cursor(x: number, y: number) { cursor.style.left = `${x}px`; cursor.style.top = `${y}px`; },
   down(v: boolean) { if (v) cursor.dataset.down = "1"; else delete cursor.dataset.down; },

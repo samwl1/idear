@@ -96,6 +96,14 @@ export const INSERT_ITEMS: InsertItem[] = [
     run: (e) => insertBlock(e, { type: "toc" }),
   },
   {
+    id: "pagelink",
+    label: "Link to a page",
+    hint: "Pick a page in this workspace; or type [[",
+    icon: "link",
+    keywords: "page link wiki reference mention",
+    run: (e) => chainAt(e).insertContent("[[").run(),
+  },
+  {
     id: "divider",
     label: "Divider",
     hint: "A horizontal line",

@@ -3,6 +3,7 @@
 // attributes on <html> that styles.css keys off.
 import { useSyncExternalStore } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { invoke } from "@tauri-apps/api/core";
 import { THEME_IDS, themeDef } from "./themes";
 
 /** A theme id from lib/themes.ts: "system", "light", "dark", or a named palette. */
@@ -30,6 +31,10 @@ export interface Prefs {
   underlineLinks: boolean;
   /** Atkinson Hyperlegible everywhere, designed for low vision. */
   readableFont: boolean;
+  /** Underline misspellings while writing. Code is never checked. */
+  spellCheck: boolean;
+  /** Languages to check against, e.g. "en_US" or "en_US, de_DE". Empty: the system's. (Linux) */
+  spellLanguages: string;
 }
 
 export const ZOOMS = [0.85, 0.9, 1, 1.1, 1.25, 1.4, 1.6];
@@ -51,6 +56,8 @@ export const DEFAULTS: Prefs = {
   focus: "normal",
   underlineLinks: false,
   readableFont: false,
+  spellCheck: true,
+  spellLanguages: "",
 };
 
 const KEY = "prefs";
@@ -67,6 +74,8 @@ function load(): Prefs {
     if (!["narrow", "normal", "wide", "full"].includes(p.width)) p.width = DEFAULTS.width;
     if (!["center", "left"].includes(p.align)) p.align = DEFAULTS.align;
     if (typeof p.margin !== "number" || !(p.margin >= MARGIN_MIN && p.margin <= MARGIN_MAX)) p.margin = DEFAULTS.margin;
+    if (typeof p.spellCheck !== "boolean") p.spellCheck = DEFAULTS.spellCheck;
+    if (typeof p.spellLanguages !== "string") p.spellLanguages = DEFAULTS.spellLanguages;
     return p;
   } catch {
     return { ...DEFAULTS };
@@ -81,6 +90,15 @@ export function resolvedTheme(p: Prefs = prefs): "light" | "dark" {
 }
 
 let appliedZoom = 1;
+let appliedSpell = "";
+
+/** The language list as the webview wants it: "en_US, de-DE" → ["en_US", "de_DE"]. */
+export function spellLanguageList(s: string): string[] {
+  return s
+    .split(/[,\s]+/)
+    .map((l) => l.trim().replace("-", "_"))
+    .filter(Boolean);
+}
 
 function apply() {
   const el = document.documentElement.dataset;
@@ -103,6 +121,15 @@ function apply() {
       .setZoom(prefs.zoom)
       .catch((e) => console.error("zoom", e));
   }
+  // Inherited by every editor, field, and textarea; code marks itself out.
+  document.documentElement.spellcheck = prefs.spellCheck;
+  const spell = `${prefs.spellCheck}:${prefs.spellLanguages}`;
+  if (spell !== appliedSpell) {
+    appliedSpell = spell;
+    invoke("set_spell_check", { enabled: prefs.spellCheck, languages: spellLanguageList(prefs.spellLanguages) }).catch((e) =>
+      console.error("spell check", e),
+    );
+  }
 }
 
 function emit() {
@@ -115,6 +142,7 @@ darkQuery.addEventListener("change", emit);
 /** Apply saved settings before the first render, so nothing flashes. */
 export function initPrefs() {
   appliedZoom = 1;
+  appliedSpell = "";
   apply();
 }
 

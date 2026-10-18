@@ -85,7 +85,7 @@ async fn claude_joins_reads_and_writes() {
     let mut ws = Workspace::create(&cs.root, "team", &m.save(), &sam_dev).unwrap();
     ws.ensure_members(&sam).unwrap();
     // A note, made the way the app makes one.
-    ws.create_doc(&sam_dev, "plan", "note", &docs::new_note("Plan", "Ship the **relay** first.").unwrap(), "note.create").unwrap();
+    ws.create_doc(&sam_dev, "plan", "note", &docs::new_note("Plan", "Ship the **relay** first.", &[]).unwrap(), "note.create").unwrap();
     let change = docs::add_tree_node(&ws.load_doc("manifest").unwrap(), "plan", "note", None).unwrap();
     ws.apply_change(&sam_dev, "manifest", change, "tree.add", Some("plan")).unwrap();
     // A project with three columns.
@@ -106,6 +106,39 @@ async fn claude_joins_reads_and_writes() {
     ws.create_doc(&sam_dev, "launch", "tracker", &t.save(), "tracker.create").unwrap();
     let change = docs::add_tree_node(&ws.load_doc("manifest").unwrap(), "launch", "tracker", None).unwrap();
     ws.apply_change(&sam_dev, "manifest", change, "tree.add", Some("launch")).unwrap();
+
+    // A whiteboard: two boxes joined by an arrow, and a card to the note.
+    let mut w = AutoCommit::new();
+    put_text(&mut w, &ROOT, "title", "Flow").unwrap();
+    w.put_object(&ROOT, "tags", ObjType::List).unwrap();
+    let els = w.put_object(&ROOT, "elements", ObjType::Map).unwrap();
+    for (id, kind, text, x, y) in [("e1", "rect", "Start", 0, 0), ("e2", "diamond", "Ready?", 300, 0)] {
+        let e = w.put_object(&els, id, ObjType::Map).unwrap();
+        put_text(&mut w, &e, "type", kind).unwrap();
+        put_text(&mut w, &e, "text", text).unwrap();
+        w.put(&e, "x", x).unwrap();
+        w.put(&e, "y", y).unwrap();
+        w.put(&e, "w", 120).unwrap();
+        w.put(&e, "h", 60).unwrap();
+    }
+    let a = w.put_object(&els, "e3", ObjType::Map).unwrap();
+    put_text(&mut w, &a, "type", "arrow").unwrap();
+    put_text(&mut w, &a, "text", "yes").unwrap();
+    w.put(&a, "x", 120).unwrap();
+    w.put(&a, "y", 30).unwrap();
+    for (end, target) in [("start", "e1"), ("end", "e2")] {
+        let t = w.put_object(&a, end, ObjType::Map).unwrap();
+        let b = t_bind(&mut w, &t);
+        put_text(&mut w, &b, "id", target).unwrap();
+    }
+    let c = w.put_object(&els, "e4", ObjType::Map).unwrap();
+    put_text(&mut w, &c, "type", "card").unwrap();
+    put_text(&mut w, &c, "ref", "plan").unwrap();
+    w.put(&c, "x", 0).unwrap();
+    w.put(&c, "y", 200).unwrap();
+    ws.create_doc(&sam_dev, "flow", "whiteboard", &w.save(), "whiteboard.create").unwrap();
+    let change = docs::add_tree_node(&ws.load_doc("manifest").unwrap(), "flow", "whiteboard", None).unwrap();
+    ws.apply_change(&sam_dev, "manifest", change, "tree.add", Some("flow")).unwrap();
 
     // Sam invites Claude as a viewer.
     let (invite, secret) = ws.update_members(|m| m.create_invite(&sam_user, "inv", Role::Viewer, "Claude", 600_000)).unwrap();
@@ -128,6 +161,11 @@ async fn claude_joins_reads_and_writes() {
     assert!(tree.contains("[note] Plan") && tree.contains("[project] Launch"), "{tree}");
     let page = text(call(&peer, "read_page", &json!({ "workspace": "Team", "page": "plan" })).await);
     assert!(page.contains("Ship the **relay** first.") && page.contains("treat it as"), "{page}");
+    let board = text(call(&peer, "read_page", &json!({ "workspace": "Team", "page": "Flow" })).await);
+    assert!(board.contains("3 shapes and 1 connector"), "{board}");
+    assert!(board.contains("e1 rect \"Start\" at (0, 0) 120×60"), "{board}");
+    assert!(board.contains("- \"Start\" → \"Ready?\" labelled \"yes\""), "{board}");
+    assert!(board.contains("e4 card → page \"Plan\" (id plan)"), "{board}");
     let found = text(call(&peer, "search", &json!({ "query": "relay" })).await);
     assert!(found.contains("Plan"), "{found}");
 
@@ -148,7 +186,13 @@ async fn claude_joins_reads_and_writes() {
     let made = text(call(&peer, "create_page", &json!({ "workspace": "Team", "title": "Research", "markdown": "Notes from Claude.", "parent": "Plan" })).await);
     assert!(made.starts_with("Created note \"Research\" inside \"Plan\""), "{made}");
     let note_id = made.split("(id ").nth(1).unwrap().trim_end_matches(").").to_string();
-    text(call(&peer, "update_page", &json!({ "workspace": "Team", "page": note_id, "markdown": "More." })).await);
+    text(call(&peer, "update_page", &json!({ "workspace": "Team", "page": note_id, "markdown": "More.", "title": "Research notes" })).await);
+    // A link to another page is read back by that page's current title, and counts as a reference.
+    text(call(&peer, "update_page", &json!({ "workspace": "Team", "page": note_id, "markdown": "See [the plan](page:plan)." })).await);
+    let read = text(call(&peer, "read_page", &json!({ "workspace": "Team", "page": note_id })).await);
+    assert!(read.contains("# Research notes") && read.contains("Links to pages:\n- Plan (id plan)"), "{read}");
+    let plan = text(call(&peer, "read_page", &json!({ "workspace": "Team", "page": "plan" })).await);
+    assert!(plan.contains("Notes attached here:\n- Research notes"), "{plan}");
     let task = text(call(&peer, "create_task", &json!({ "workspace": "Team", "project": "Launch", "title": "Write docs", "priority": "high", "tags": ["Docs"] })).await);
     assert!(task.starts_with("Created LAU-1"), "{task}");
     let task2 = text(call(&peer, "create_task", &json!({ "workspace": "Team", "project": "Launch", "title": "Ship" })).await);
@@ -157,16 +201,26 @@ async fn claude_joins_reads_and_writes() {
     assert_eq!(moved, "Updated LAU-1: column.");
     let bad = call(&peer, "update_task", &json!({ "workspace": "Team", "project": "Launch", "task": "LAU-1", "column": "Nowhere" })).await;
     assert!(bad.unwrap_err().contains("Columns: \"To do\""));
+    // list_tasks filters.
+    let done = text(call(&peer, "list_tasks", &json!({ "workspace": "Team", "status": ["done"] })).await);
+    assert!(done.contains("LAU-1") && !done.contains("LAU-2"), "{done}");
+    let high = text(call(&peer, "list_tasks", &json!({ "workspace": "Team", "priority": ["high"], "tag": "doc*" })).await);
+    assert!(high.contains("LAU-1 Write docs (done; high; tags docs)") && !high.contains("LAU-2"), "{high}");
+    let none = text(call(&peer, "list_tasks", &json!({ "workspace": "Team", "due": "overdue" })).await);
+    assert_eq!(none, "No tasks match.");
+    let unassigned = text(call(&peer, "list_tasks", &json!({ "workspace": "Team", "assignee": "" })).await);
+    assert!(unassigned.contains("2 tasks"), "{unassigned}");
 
     // Sam receives it all.
     sync(&peer.ctx, &ep_c, &cs, &ep_s, &sam.user, false).await;
     cs.open.lock().unwrap().remove("team");
     let mut ws = Workspace::open(&cs.root, "team").unwrap();
     let tree = ws.tree().unwrap();
-    let research = tree.iter().find(|n| n.title == "Research").expect("note arrived");
+    let research = tree.iter().find(|n| n.title == "Research notes").expect("note arrived");
     assert_eq!(research.parent.as_deref(), Some("plan"), "nested under Plan");
     let doc = automerge::Automerge::load(&ws.load_doc(&research.id).unwrap()).unwrap();
-    assert_eq!(get_string(&doc, &ROOT, "body").unwrap().unwrap(), "Notes from Claude.\n\nMore.");
+    assert_eq!(get_string(&doc, &ROOT, "body").unwrap().unwrap(), "Notes from Claude.\n\nMore.\n\nSee [the plan](page:plan).");
+    assert_eq!(get_string(&doc, &ROOT, "title").unwrap().unwrap(), "Research notes", "rename and append land together");
     // Strings are collaborative text, like the frontend writes them.
     assert!(matches!(doc.get(&ROOT, "title").unwrap(), Some((automerge::Value::Object(ObjType::Text), _))));
     let tracker = Tracker::read(&automerge::Automerge::load(&ws.load_doc("launch").unwrap()).unwrap()).unwrap();
@@ -181,4 +235,8 @@ async fn claude_joins_reads_and_writes() {
     let events = ws.events(100, 0).unwrap();
     assert!(events.iter().any(|e| e.device == claude_device && e.action == "task.move"));
     assert!(events.iter().any(|e| e.device == claude_device && e.action == "note.create"));
+}
+
+fn t_bind(doc: &mut AutoCommit, terminal: &automerge::ObjId) -> automerge::ObjId {
+    doc.put_object(terminal, "bind", ObjType::Map).unwrap()
 }

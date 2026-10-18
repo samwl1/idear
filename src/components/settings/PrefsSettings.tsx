@@ -50,7 +50,7 @@ function TextSize({ p }: { p: Prefs }) {
   );
 }
 
-const APPEARANCE: (keyof Prefs)[] = ["theme", "accent", "zoom", "density", "readingFont", "width", "margin", "align"];
+const APPEARANCE: (keyof Prefs)[] = ["theme", "accent", "zoom", "density", "readingFont", "width", "margin", "align", "spellCheck", "spellLanguages"];
 const ACCESS: (keyof Prefs)[] = ["motion", "contrast", "focus", "underlineLinks", "readableFont"];
 
 function isDefault(p: Prefs, keys: (keyof Prefs)[]) {
@@ -169,6 +169,26 @@ export function AppearanceSettings() {
             </span>
           </Field>
         )}
+      </section>
+
+      <section className="card">
+        <h2>Writing</h2>
+        <Field label="Spell check" hint="Underlines misspellings in notes, tasks, and whiteboards as you type. Right-click a word for suggestions. Code is never checked.">
+          <Toggle label="Spell check" checked={p.spellCheck} onChange={(spellCheck) => setPrefs({ spellCheck })} />
+        </Field>
+        {p.spellCheck && !mac && (
+          <Field label="Languages" hint='Dictionaries to check against, like "en_US" or "en_US, de_DE". Empty uses the system language. Needs the matching hunspell dictionary installed.'>
+            <input
+              className="field"
+              aria-label="Spell check languages"
+              placeholder="System language"
+              defaultValue={p.spellLanguages}
+              onBlur={(e) => setPrefs({ spellLanguages: e.currentTarget.value.trim() })}
+              onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            />
+          </Field>
+        )}
+        {p.spellCheck && mac && <p className="muted small">On macOS, the dictionary follows System Settings → Keyboard → Spelling.</p>}
       </section>
 
       <section className="card">

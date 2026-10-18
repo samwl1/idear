@@ -78,6 +78,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::device_id,
+            commands::set_spell_check,
             account::account_info,
             account::set_user_name,
             account::rename_device,

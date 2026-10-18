@@ -25,6 +25,9 @@ import { Icon } from "./Icon";
 import { useDebounced } from "../lib/useDebounced";
 import { openExternal } from "../lib/openLink";
 import { useCanEdit } from "../lib/access";
+import { usePrefs } from "../lib/prefs";
+import { PageLinkSuggestion, pageLinkId } from "../editor/pagelink";
+import { showToast } from "../lib/toast";
 
 // Notes are stored as markdown. Markdown has no syntax for color, so colored
 // and highlighted text are written as small inline HTML spans, which the
@@ -174,6 +177,7 @@ export function MarkdownEditor({
 }: Props) {
   const save = useDebounced(onChange, delay);
   const canEdit = useCanEdit();
+  const prefs = usePrefs();
   const editor = useEditor({
     editable: canEdit,
     extensions: [
@@ -181,10 +185,12 @@ export function MarkdownEditor({
       // not inside the app's own window.
       StarterKit.configure({
         codeBlock: false,
+        // Inline code is names and symbols, not prose: leave it out of spell check.
+        code: { HTMLAttributes: { spellcheck: "false" } },
         link: {
           openOnClick: false,
           autolink: true,
-          protocols: ["http", "https", "mailto"],
+          protocols: ["http", "https", "mailto", { scheme: "page", optionalSlashes: true }],
           HTMLAttributes: { title: `${MOD}click to open` },
         },
       }),
@@ -205,7 +211,7 @@ export function MarkdownEditor({
       TableRow,
       TableHeader.extend({ content: "paragraph+" }),
       TableCell.extend({ content: "paragraph+" }),
-      ...(canEdit ? [SlashCommand.configure({ page: page ?? null }), TabKey, MoveBlock] : []),
+      ...(canEdit ? [SlashCommand.configure({ page: page ?? null }), PageLinkSuggestion.configure({ page: page ?? null }), TabKey, MoveBlock] : []),
       // The slash menu is how blocks get inserted; say so on the empty line the cursor is on.
       Placeholder.configure({
         placeholder: ({ editor: e }) => (e.isEmpty ? "Write, or type / to insert a block" : "Type / to insert a block"),
@@ -217,7 +223,7 @@ export function MarkdownEditor({
     content: initial,
     contentType: "markdown",
     editorProps: {
-      attributes: { class: className, "aria-label": label },
+      attributes: { class: className, "aria-label": label, spellcheck: String(prefs.spellCheck) },
       // A plain click edits the link like any text; Cmd+click (Ctrl+click on
       // Linux) opens it in the system browser. The DOM click is always
       // prevented so the webview itself never follows the link.
@@ -226,6 +232,13 @@ export function MarkdownEditor({
           const a = (event.target as HTMLElement | null)?.closest("a[href]");
           if (!a) return false;
           event.preventDefault();
+          // A link to another page opens it with a plain click, like the sidebar.
+          const pageId = pageLinkId(a.getAttribute("href"));
+          if (pageId) {
+            if (page?.session.node(pageId)) page.onOpen(pageId);
+            else showToast("That page isn't in this workspace anymore");
+            return true;
+          }
           if (event.metaKey || event.ctrlKey) {
             openExternal(a.getAttribute("href"));
             return true;
@@ -241,6 +254,11 @@ export function MarkdownEditor({
     onEditor?.(editor);
     return () => onEditor?.(null);
   }, [editor, onEditor]);
+
+  // The spell check setting changes without remounting the editor.
+  useEffect(() => {
+    editor?.view.dom.setAttribute("spellcheck", String(prefs.spellCheck));
+  }, [editor, prefs.spellCheck]);
 
   return (
     <div className="rich">

@@ -125,7 +125,7 @@ function CodeBlockView({ node, updateAttributes, editor }: ReactNodeViewProps) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <pre>
+      <pre spellCheck={false}>
         <NodeViewContent<"code"> as="code" />
       </pre>
     </NodeViewWrapper>

@@ -40,8 +40,8 @@ then they show "Waiting for Claude". Then ask something like "What's in my Team 
 | `list_workspaces` | Workspaces Claude is in, and its role in each |
 | `page_tree` | A workspace's folders and pages |
 | `search` | Full-text search over notes, whiteboards, projects, and tasks |
-| `read_page` | A note's markdown, a project's columns and tasks, or a whiteboard's text |
-| `list_tasks` | Tasks filtered by project, status, assignee, or text |
+| `read_page` | A note's markdown, a project's columns and tasks, or a whiteboard's shapes, text, and connections |
+| `list_tasks` | Tasks filtered by project, status, priority, due date, phase, assignee, tag, or text; archived on request |
 | `create_page` | A new note, anywhere in the tree (editors only) |
 | `update_page` | Add to a note, replace its text, or rename it (editors only) |
 | `create_task` | A new task in a project (editors only) |
@@ -49,7 +49,7 @@ then they show "Waiting for Claude". Then ask something like "What's in my Team 
 | `sync_now` | Sync right away and report who was reached |
 
 Claude can write with every macro the editor has: code blocks, panels, expands, child pages, and
-tables of contents. It can't add images.
+tables of contents, and link to other pages with `[Title](page:<id>)`. It can't add images.
 
 ## How it works
 
