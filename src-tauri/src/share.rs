@@ -1,23 +1,27 @@
 //! Sharing workspaces with other people: invites, roles, and joining.
 //!
-//! An invite link is `notes-share-1.<base64url JSON>` holding the owner-signed
-//! invite record, its one-time secret, the workspace name, and the owner's
-//! public identity (so the joiner can find and check the owner's devices).
+//! An invite link is `idear-share-2.<base64url>`: the owner's user key, the
+//! device that made it and its relay, the invite id, the expiry, and the
+//! one-time secret (sealed under a passphrase if the owner chose one).
 //! Joining is finished over live sync: the joiner's device keeps dialing the
-//! owner's devices with the secret until one of them answers and adds them.
+//! owner's devices with the secret until one answers. By default the owner
+//! then approves the person before they're added.
 
 use std::collections::BTreeMap;
 
 use notes_core::identity::IdentityState;
 use notes_core::members::{InviteView, MemberView, Role};
-use notes_peer::invite::{read_invite, Token};
+use notes_peer::invite::{read_invite, Link};
+use notes_peer::sync::{Approval, JoinStatus};
 use serde::Serialize;
 use tauri::State;
 
 use crate::commands::{own_identity, with_ws, AppState, CmdResult};
 use crate::sync::PendingJoin;
 
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+/// How long an invite may last: a month.
+const MAX_HOURS: u32 = 30 * 24;
 
 fn now() -> i64 {
     std::time::SystemTime::now()
@@ -94,6 +98,8 @@ pub async fn share_info(state: State<'_, AppState>, workspace_id: String) -> Cmd
 #[serde(rename_all = "camelCase")]
 pub struct CreatedInvite {
     token: String,
+    /// Set when the link is sealed: send it by another route than the link.
+    passphrase: Option<String>,
     info: ShareInfo,
 }
 
@@ -101,16 +107,22 @@ fn user_key(state: &AppState) -> CmdResult<ed25519_dalek::SigningKey> {
     Ok(state.account.lock().map_err(|_| "account lock poisoned".to_string())?.user.clone())
 }
 
+/// `hours`: how long the link works (1 to 720). `approve`: you confirm each
+/// person before they're added. `passphrase`: seal the link's secret under a
+/// generated passphrase, returned alongside, to send by a different route.
 #[tauri::command]
 pub async fn create_invite(
     state: State<'_, AppState>,
     workspace_id: String,
     role: String,
     label: String,
-    days: u32,
+    hours: u32,
+    approve: bool,
+    passphrase: bool,
 ) -> CmdResult<CreatedInvite> {
-    let (token, _, info) = make_invite(&state, &workspace_id, parse_role(&role)?, &label, days)?;
-    Ok(CreatedInvite { token, info })
+    let pass = if passphrase { Some(notes_core::identity::new_passphrase().map_err(|e| e.to_string())?) } else { None };
+    let (token, _, info) = make_invite(&state, &workspace_id, parse_role(&role)?, &label, hours, approve, pass.as_deref())?;
+    Ok(CreatedInvite { token, passphrase: pass, info })
 }
 
 /// A new invite link: (link, invite id, the workspace's sharing info).
@@ -119,14 +131,16 @@ pub(crate) fn make_invite(
     workspace_id: &str,
     role: Role,
     label: &str,
-    days: u32,
+    hours: u32,
+    approve: bool,
+    passphrase: Option<&str>,
 ) -> CmdResult<(String, String, ShareInfo)> {
     let label = label.trim().to_string();
     if label.len() > 80 {
         return Err("Keep the label under 80 characters.".into());
     }
-    if !(1..=30).contains(&days) {
-        return Err("Invites can last 1 to 30 days.".into());
+    if !(1..=MAX_HOURS).contains(&hours) {
+        return Err("Invites can last from an hour to 30 days.".into());
     }
     if !matches!(role, Role::Editor | Role::Viewer) {
         return Err("Invites are for editors or viewers.".into());
@@ -136,14 +150,20 @@ pub(crate) fn make_invite(
     let mut id_bytes = [0u8; 8];
     getrandom::getrandom(&mut id_bytes).map_err(|e| e.to_string())?;
     let id = hex::encode(id_bytes);
-    let (token, info) = with_ws(state, workspace_id, |ws, device| {
+    let me = notes_core::workspace::device_id(&state.key);
+    let relay = own.addresses.get(&me).and_then(|r| r.relay.clone());
+    let (link, info) = with_ws(state, workspace_id, |ws, device| {
         ws.ensure_members(&own)?;
-        let (invite, secret) = ws.update_members(|m| m.create_invite(&key, &id, role, &label, days as i64 * DAY_MS))?;
-        ws.log_event(device, "invite.create", &id, serde_json::json!({ "role": role.as_str(), "label": label }))?;
-        let token = Token { invite, secret: hex::encode(secret), workspace_name: ws.name()?, owner: own.clone() };
-        Ok((token, share_view(ws, &own)?))
+        let (invite, secret) = ws.update_members(|m| m.create_invite(&key, &id, role, &label, hours as i64 * HOUR_MS, approve))?;
+        ws.log_event(device, "invite.create", &id, serde_json::json!({ "role": role.as_str(), "label": label, "approve": approve }))?;
+        let link = match passphrase {
+            Some(p) => Link::sealed(&own.user, &me, relay.as_deref(), &id, invite.expires, &secret, p)
+                .map_err(notes_core::CoreError::Invalid)?,
+            None => Link::new(&own.user, &me, relay.as_deref(), &id, invite.expires, &secret),
+        };
+        Ok((link, share_view(ws, &own)?))
     })?;
-    Ok((token.encode()?, id, info))
+    Ok((link.encode()?, id, info))
 }
 
 #[tauri::command]
@@ -201,46 +221,93 @@ pub(crate) fn set_role(state: &AppState, workspace_id: &str, user: &str, role: R
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinView {
+    /// The invite id: what to cancel by.
+    id: String,
+    /// Empty until the owner has answered.
     workspace: String,
     workspace_name: String,
     owner_name: String,
-    role: Role,
     added: i64,
     expires: i64,
     last_attempt: Option<i64>,
     last_error: Option<String>,
+    /// "trying", "waiting" (for the owner's approval), or "declined".
+    status: JoinStatus,
 }
 
 impl From<PendingJoin> for JoinView {
     fn from(j: PendingJoin) -> Self {
         Self {
-            workspace: j.invite.workspace.clone(),
+            id: j.invite_id.clone(),
+            workspace: j.workspace.clone(),
             workspace_name: j.workspace_name,
             owner_name: j.owner.display_name(),
-            role: j.invite.role,
             added: j.added,
-            expires: j.invite.expires,
+            expires: j.expires,
             last_attempt: j.last_attempt,
             last_error: j.last_error,
+            status: j.status,
         }
     }
 }
 
+/// Whether a link needs a passphrase before it can be used.
 #[tauri::command]
-pub async fn join_shared(state: State<'_, AppState>, token: String) -> CmdResult<JoinView> {
+pub async fn inspect_invite(token: String) -> CmdResult<bool> {
+    Ok(Link::decode(&token)?.needs_passphrase())
+}
+
+#[tauri::command]
+pub async fn join_shared(state: State<'_, AppState>, token: String, passphrase: Option<String>) -> CmdResult<JoinView> {
     let own = own_identity(&state)?;
-    let join = read_invite(&token, &own.user)?;
-    if state.root.join(&join.invite.workspace).exists() {
-        let has = with_ws(&state, &join.invite.workspace, |ws, _| {
-            Ok(ws.members().and_then(|m| m.role(&own.user)).is_some_and(Role::has_access))
-        })?;
-        if has {
-            return Err("You already have this workspace.".into());
-        }
-    }
+    let join = read_invite(&token, passphrase.as_deref(), &own.user)?;
     state.sync.joins().add(join.clone());
     state.sync.kick();
     Ok(join.into())
+}
+
+// ---- approving people -----------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalView {
+    workspace: String,
+    workspace_name: String,
+    invite: String,
+    user: String,
+    name: String,
+    role: Role,
+    asked: i64,
+    /// A readable fingerprint of their user key, to check over another channel.
+    fingerprint: String,
+}
+
+impl From<Approval> for ApprovalView {
+    fn from(a: Approval) -> Self {
+        Self {
+            fingerprint: a.user().to_string(),
+            name: a.name(),
+            user: a.user().to_string(),
+            workspace: a.workspace,
+            workspace_name: a.workspace_name,
+            invite: a.invite,
+            role: a.role,
+            asked: a.asked,
+        }
+    }
+}
+
+/// People who redeemed an invite and are waiting for you.
+#[tauri::command]
+pub async fn list_approvals(state: State<'_, AppState>) -> CmdResult<Vec<ApprovalView>> {
+    Ok(state.sync.approvals().list().into_iter().filter(|a| a.approved.is_none()).map(ApprovalView::from).collect())
+}
+
+#[tauri::command]
+pub async fn decide_join(state: State<'_, AppState>, invite: String, user: String, approve: bool) -> CmdResult<Vec<ApprovalView>> {
+    state.sync.ctx().decide_join(&invite, &user, approve)?;
+    state.sync.kick();
+    Ok(state.sync.approvals().list().into_iter().filter(|a| a.approved.is_none()).map(ApprovalView::from).collect())
 }
 
 #[tauri::command]
@@ -249,8 +316,8 @@ pub async fn list_joins(state: State<'_, AppState>) -> CmdResult<Vec<JoinView>> 
 }
 
 #[tauri::command]
-pub async fn cancel_join(state: State<'_, AppState>, workspace: String) -> CmdResult<Vec<JoinView>> {
-    state.sync.joins().remove(&workspace);
+pub async fn cancel_join(state: State<'_, AppState>, id: String) -> CmdResult<Vec<JoinView>> {
+    state.sync.joins().remove(&id);
     Ok(state.sync.joins().list().into_iter().map(JoinView::from).collect())
 }
 

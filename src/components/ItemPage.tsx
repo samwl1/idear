@@ -16,6 +16,8 @@ import type { TrackerDoc } from "../tracker/model";
 import { useCanEdit } from "../lib/access";
 import { showToast } from "../lib/toast";
 import { pageLinksIn } from "../editor/pagelink";
+import { api } from "../lib/api";
+import { Icon } from "./Icon";
 
 interface Props {
   session: WorkspaceSession;
@@ -146,6 +148,7 @@ function ItemTop({
       <Breadcrumbs session={session} id={id} onError={onError} />
       {children}
       <PinButton workspace={session.id} pin={{ kind: "node", id }} pinned={isPinned(pins, { kind: "node", id })} />
+      {session.node(id)?.kind === "note" && <PrintButton session={session} id={id} onError={onError} />}
       <PopOutButton session={session} id={id} />
     </div>
   );
@@ -336,6 +339,34 @@ function NoteBody({
           .catch(onError)
       }
     />
+  );
+}
+
+/**
+ * Print, or save as PDF: the system dialog does both. The print stylesheet
+ * hides everything but the note, and the window title becomes the file name.
+ */
+function PrintButton({ session, id, onError }: { session: WorkspaceSession; id: string; onError: (err: unknown) => void }) {
+  const print = async () => {
+    const was = document.title;
+    document.title = String(session.node(id)?.title || "Untitled");
+    document.documentElement.dataset.print = "note";
+    try {
+      await api.printWindow();
+    } catch (e) {
+      onError(e);
+    } finally {
+      // The dialog has taken what it needs by now (it's modal on both platforms).
+      setTimeout(() => {
+        delete document.documentElement.dataset.print;
+        document.title = was;
+      }, 1500);
+    }
+  };
+  return (
+    <button className="tool" aria-label="Print or save as PDF" title="Print or save as PDF" onClick={print}>
+      <Icon name="printer" />
+    </button>
   );
 }
 

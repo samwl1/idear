@@ -474,14 +474,14 @@ mod sync_files {
             created_by: key_id(&by.verifying_key()),
             created: 0,
             identity: s.ids.clone(),
-            workspaces: vec![ws.export().unwrap()],
+            workspaces: vec![ws.export(true).unwrap()],
             members: Default::default(),
         };
         bundle::seal(&s.user, &b).unwrap()
     }
 
     fn unpack(s: &Setup, root: &std::path::Path, bytes: &[u8], ids: &IdentityState, me: &SigningKey) -> WorkspaceImport {
-        let b = bundle::open(&s.user, bytes).unwrap();
+        let b = bundle::open(&s.user, bytes, None).unwrap();
         let trusted = |d: &str, ts: i64, _: &str| ids.trusted_at(d, ts);
         Workspace::import(root, &b.workspaces[0], None, &trusted, &key_id(&me.verifying_key())).unwrap()
     }
@@ -592,7 +592,7 @@ mod sync_files {
         add_to_tree(&mut wa, &s.a, &mut m, "n1");
 
         // B has nothing yet: everything goes.
-        let first = wa.delta_for(None).unwrap();
+        let first = wa.delta_for(None, true).unwrap();
         Workspace::import(rb.path(), &first, None, &trusted, &b_id).unwrap();
         let mut wb = Workspace::open(rb.path(), "ws").unwrap();
 
@@ -603,7 +603,7 @@ mod sync_files {
         let c = n.get_last_local_change().unwrap().raw_bytes().to_vec();
         wa.apply_change(&s.a, "n1", c, "note.rename", None).unwrap();
 
-        let delta = wa.delta_for(Some(&wb.summary().unwrap())).unwrap();
+        let delta = wa.delta_for(Some(&wb.summary(true).unwrap()), true).unwrap();
         assert_eq!(delta.events.len(), 1);
         assert_eq!(delta.docs.len(), 1);
         assert_eq!(delta.docs[0].changes.as_ref().map(|c| c.len()), Some(1));
@@ -615,9 +615,9 @@ mod sync_files {
         assert_eq!(wb.tree().unwrap()[0].title, "Plan!");
 
         // In sync: nothing left to send either way.
-        let empty = wa.delta_for(Some(&wb.summary().unwrap())).unwrap();
+        let empty = wa.delta_for(Some(&wb.summary(true).unwrap()), true).unwrap();
         assert!(empty.events.is_empty() && empty.docs.is_empty());
-        let back = wb.delta_for(Some(&wa.summary().unwrap())).unwrap();
+        let back = wb.delta_for(Some(&wa.summary(true).unwrap()), true).unwrap();
         assert!(back.events.is_empty() && back.docs.is_empty());
     }
 
@@ -630,11 +630,18 @@ mod sync_files {
         add_to_tree(&mut wa, &s.a, &mut m, "n0");
         let file = pack(&s, &s.a, &mut wa);
         assert!(!file.windows(12).any(|w| w == b"Secret plans"), "contents must not be readable");
-        assert!(bundle::open(&key(9), &file).is_err(), "another identity can't open it");
+        assert!(bundle::open(&key(9), &file, None).is_err(), "another identity can't open it");
+        // Sealed under a passphrase instead: any device with the passphrase, and only those.
+        let b = bundle::open(&s.user, &file, None).unwrap();
+        let pass = bundle::seal_with(&s.user, &b, "correct horse").unwrap();
+        assert!(bundle::needs_passphrase(&pass) && !bundle::needs_passphrase(&file));
+        assert!(bundle::open(&key(9), &pass, None).err().is_some_and(|e| e.to_string().contains("passphrase")));
+        assert!(bundle::open(&key(9), &pass, Some("wrong")).is_err());
+        assert_eq!(bundle::open(&key(9), &pass, Some("CORRECT HORSE")).unwrap().identity.user, b.identity.user);
         let mut bad = file.clone();
         let i = bad.len() - 5;
         bad[i] ^= 1;
-        assert!(bundle::open(&s.user, &bad).is_err(), "a flipped bit is detected");
+        assert!(bundle::open(&s.user, &bad, None).is_err(), "a flipped bit is detected");
     }
 
     #[test]
@@ -651,7 +658,7 @@ mod sync_files {
             created_by: key_id(&s.a.verifying_key()),
             created: 0,
             identity: s.ids.clone(),
-            workspaces: vec![wa.export().unwrap()],
+            workspaces: vec![wa.export(true).unwrap()],
             members: Default::default(),
         };
         // Without a published box key there's nothing to seal to.
@@ -659,15 +666,15 @@ mod sync_files {
         alex_ids.box_key = Some(BoxKey::issue(&alex).unwrap());
         let file = bundle::seal_for(&alex_ids, &b).unwrap();
         assert!(!file.windows(8).any(|w| w == b"For Alex"));
-        let opened = bundle::open(&alex, &file).unwrap();
+        let opened = bundle::open(&alex, &file, None).unwrap();
         assert_eq!(opened.workspaces[0].name, "For Alex");
         // Not the sender, not anyone else.
-        assert!(bundle::open(&s.user, &file).is_err());
-        assert!(bundle::open(&key(21), &file).is_err());
+        assert!(bundle::open(&s.user, &file, None).is_err());
+        assert!(bundle::open(&key(21), &file, None).is_err());
         let mut bad = file.clone();
         let i = bad.len() - 3;
         bad[i] ^= 1;
-        assert!(bundle::open(&alex, &bad).is_err());
+        assert!(bundle::open(&alex, &bad, None).is_err());
     }
 }
 
@@ -722,7 +729,7 @@ mod sharing {
     /// Send everything `from` has to `to`, as live sync would, trusting by `to`'s membership.
     fn send(from: &std::path::Path, to: &std::path::Path, own_to: &IdentityState, me: &SigningKey) -> WorkspaceImport {
         let mut src = Workspace::open(from, "w").unwrap();
-        let bundle = src.export().unwrap();
+        let bundle = src.export(true).unwrap();
         let theirs = src.members().cloned();
         // Trust is decided by the receiver's membership merged with what arrives.
         let mut effective = Workspace::open(to, "w").ok().and_then(|w| w.members().cloned()).or(theirs.clone()).unwrap();
@@ -867,7 +874,7 @@ mod sharing {
         // Alex has an unrelated workspace that happens to use the same id.
         let mut theirs = Workspace::create(rx.path(), "w", &manifest().save(), &xd).unwrap();
         theirs.ensure_members(&xid).unwrap();
-        let bundle = theirs.export().unwrap();
+        let bundle = theirs.export(true).unwrap();
         let m = theirs.members().cloned();
         let trusted = |_: &str, _: i64, _: &str| true;
         assert!(Workspace::import(ro.path(), &bundle, m.as_ref(), &trusted, "me").is_err());

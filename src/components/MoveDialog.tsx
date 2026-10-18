@@ -93,6 +93,6 @@ export async function moveSubtree(from: WorkspaceSession, id: string, target: Wo
   to.setCanEdit(canEditRole(target.role));
   const ids = await to.importSubtree(null, sub, "tree.move_in");
   await from.deleteNode(id, "tree.move_out");
-  carryPins(from.id, target.id, ids);
+  await carryPins(from, to, ids);
   return ids;
 }

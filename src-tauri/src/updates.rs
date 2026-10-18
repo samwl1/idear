@@ -19,32 +19,62 @@ const IMPORT_LIMIT: u64 = 512 * 1024 * 1024;
 pub struct ExportView {
     workspaces: usize,
     bytes: u64,
+    /// Set when the file was sealed under a generated passphrase.
+    passphrase: Option<String>,
 }
 
 /// `recipient` is a person's user ID, or None for your own devices.
+/// `passphrase`: seal under a generated passphrase instead of to a key, so a
+/// device that isn't yours (or isn't known yet) can open it with the phrase.
+/// Such a file for a person holds only what you share with them, as usual;
+/// one for your own devices holds everything, so keep the phrase close.
 #[tauri::command]
 pub async fn export_update(
     state: State<'_, AppState>,
     path: String,
     workspace_ids: Vec<String>,
     recipient: Option<String>,
+    passphrase: Option<bool>,
 ) -> CmdResult<ExportView> {
     if workspace_ids.is_empty() {
         return Err("Pick at least one workspace to export.".into());
     }
     let ctx = state.sync.ctx();
-    let (b, to) = ctx.export_bundle(&workspace_ids, recipient.as_deref())?;
-    let path = PathBuf::from(path);
-    match to {
-        Some(theirs) => bundle::write_for(&path, &theirs, &b),
-        None => {
-            let user = state.account.lock().map_err(|_| "account lock poisoned")?.user.clone();
-            bundle::write(&path, &user, &b)
+    let (b, to) = match ctx.export_bundle(&workspace_ids, recipient.as_deref()) {
+        Ok(x) => x,
+        // The recipient's key isn't known yet: a passphrase file doesn't need it.
+        Err(e) if passphrase == Some(true) && recipient.is_some() && e.contains("doesn't know") => {
+            let (b, _) = ctx.export_bundle_unsealed(&workspace_ids, recipient.as_deref())?;
+            (b, None)
         }
+        Err(e) => return Err(e),
+    };
+    let path = PathBuf::from(path);
+    let user = state.account.lock().map_err(|_| "account lock poisoned")?.user.clone();
+    let mut phrase = None;
+    if passphrase == Some(true) {
+        let p = notes_core::identity::new_passphrase().map_err(|e| e.to_string())?;
+        bundle::write_with(&path, &user, &b, &p).map_err(|e| e.to_string())?;
+        phrase = Some(p);
+    } else {
+        match to {
+            Some(theirs) => bundle::write_for(&path, &theirs, &b),
+            None => bundle::write(&path, &user, &b),
+        }
+        .map_err(|e| e.to_string())?;
     }
-    .map_err(|e| e.to_string())?;
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    Ok(ExportView { workspaces: workspace_ids.len(), bytes })
+    Ok(ExportView { workspaces: workspace_ids.len(), bytes, passphrase: phrase })
+}
+
+/// Whether an update file needs a passphrase to open.
+#[tauri::command]
+pub async fn inspect_update(path: String) -> CmdResult<bool> {
+    let mut head = [0u8; 16];
+    let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    use std::io::Read;
+    let n = f.read(&mut head).map_err(|e| e.to_string())?;
+    Ok(bundle::needs_passphrase(&head[..n]))
 }
 
 #[derive(Serialize)]
@@ -58,7 +88,7 @@ pub struct ImportView {
 }
 
 #[tauri::command]
-pub async fn import_update(state: State<'_, AppState>, path: String) -> CmdResult<ImportView> {
+pub async fn import_update(state: State<'_, AppState>, path: String, passphrase: Option<String>) -> CmdResult<ImportView> {
     let user = state.account.lock().map_err(|_| "account lock poisoned")?.user.clone();
     let path = PathBuf::from(path);
     let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
@@ -69,7 +99,7 @@ pub async fn import_update(state: State<'_, AppState>, path: String) -> CmdResul
             IMPORT_LIMIT / (1024 * 1024)
         ));
     }
-    let b = bundle::read(&path, &user).map_err(|e| e.to_string())?;
+    let b = bundle::read(&path, &user, passphrase.as_deref()).map_err(|e| e.to_string())?;
     let created = b.created;
     let r = state.sync.ctx().import_bundle(b)?;
     state.sync.kick();

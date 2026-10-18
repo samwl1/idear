@@ -504,6 +504,40 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
+/// Seal `plain` under a passphrase: Argon2id key, XChaCha20-Poly1305.
+/// Output is salt (16) + nonce (24) + ciphertext.
+pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 24];
+    getrandom::getrandom(&mut salt).map_err(|e| CoreError::Invalid(e.to_string()))?;
+    getrandom::getrandom(&mut nonce).map_err(|e| CoreError::Invalid(e.to_string()))?;
+    let key = derive_key(passphrase, &salt)?;
+    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
+    let sealed = cipher
+        .encrypt(XNonce::from_slice(&nonce), plain)
+        .map_err(|_| CoreError::Invalid("encryption failed".into()))?;
+    let mut out = Vec::with_capacity(16 + 24 + sealed.len());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&sealed);
+    Ok(out)
+}
+
+/// The inverse of `seal_with_passphrase`. `what` names the thing for the error.
+pub fn open_with_passphrase(bytes: &[u8], passphrase: &str, what: &str) -> Result<Zeroizing<Vec<u8>>> {
+    if bytes.len() < 16 + 24 + 16 {
+        return Err(CoreError::Invalid(format!("The {what} is damaged or incomplete.")));
+    }
+    let (salt, rest) = bytes.split_at(16);
+    let (nonce, sealed) = rest.split_at(24);
+    let key = derive_key(passphrase, salt)?;
+    Ok(Zeroizing::new(
+        XChaCha20Poly1305::new(key.as_ref().into())
+            .decrypt(XNonce::from_slice(nonce), sealed)
+            .map_err(|_| CoreError::Invalid(format!("Wrong passphrase, or the {what} was changed.")))?,
+    ))
+}
+
 /// Seal an invite. The code is safe to send over anything; the passphrase
 /// must travel separately (read it off one screen, type it on the other).
 pub fn create_invite(
@@ -520,20 +554,7 @@ pub fn create_invite(
         expires: now_ms() + valid_for_ms,
     };
     let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
-    let mut salt = [0u8; 16];
-    let mut nonce = [0u8; 24];
-    getrandom::getrandom(&mut salt).map_err(|e| CoreError::Invalid(e.to_string()))?;
-    getrandom::getrandom(&mut nonce).map_err(|e| CoreError::Invalid(e.to_string()))?;
-    let key = derive_key(passphrase, &salt)?;
-    let cipher = XChaCha20Poly1305::new(key.as_ref().into());
-    let sealed = cipher
-        .encrypt(XNonce::from_slice(&nonce), plain.as_slice())
-        .map_err(|_| CoreError::Invalid("encryption failed".into()))?;
-    let mut out = Vec::with_capacity(16 + 24 + sealed.len());
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&sealed);
-    Ok(format!("{INVITE_PREFIX}{}", B64.encode(out)))
+    Ok(format!("{INVITE_PREFIX}{}", B64.encode(seal_with_passphrase(&plain, passphrase)?)))
 }
 
 pub fn open_invite(code: &str, passphrase: &str) -> Result<InvitePayload> {
@@ -542,17 +563,7 @@ pub fn open_invite(code: &str, passphrase: &str) -> Result<InvitePayload> {
     })?;
     let raw: String = body.chars().filter(|c| !c.is_whitespace()).collect();
     let bytes = B64.decode(raw).map_err(|_| CoreError::Invalid("The link code is damaged or incomplete.".into()))?;
-    if bytes.len() < 16 + 24 + 16 {
-        return Err(CoreError::Invalid("The link code is damaged or incomplete.".into()));
-    }
-    let (salt, rest) = bytes.split_at(16);
-    let (nonce, sealed) = rest.split_at(24);
-    let key = derive_key(passphrase, salt)?;
-    let plain = Zeroizing::new(
-        XChaCha20Poly1305::new(key.as_ref().into())
-            .decrypt(XNonce::from_slice(nonce), sealed)
-            .map_err(|_| CoreError::Invalid("Wrong passphrase, or the code was changed.".into()))?,
-    );
+    let plain = open_with_passphrase(&bytes, passphrase, "link code")?;
     let mut payload: InvitePayload = serde_json::from_slice(&plain)?;
     if payload.expires < now_ms() {
         return Err(CoreError::Invalid("This link code has expired. Create a new one on your other device.".into()));

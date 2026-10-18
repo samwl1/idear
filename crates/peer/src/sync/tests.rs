@@ -2,6 +2,7 @@ use super::*;
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjType, ReadDoc, ROOT};
 use notes_core::identity::{DeviceCert, NameRecord};
+use notes_core::members::InviteRecord;
 
 fn key(n: u8) -> SigningKey {
     SigningKey::from_bytes(&[n; 32])
@@ -25,6 +26,26 @@ fn ctx(root: &std::path::Path, user: &SigningKey, device: &SigningKey, ids: &Ide
         account: Arc::new(Mutex::new(account)),
         open: Arc::new(Mutex::new(HashMap::new())),
         joins: Arc::new(Joins::load(root.join("joins.json"))),
+        approvals: Arc::new(Approvals::load(root.join("approvals.json"))),
+    }
+}
+
+/// A join as the app builds one from a link, with the workspace already
+/// known (as it is once the owner has answered, or from an old-style link).
+fn pending(record: &InviteRecord, secret: [u8; 32], owner: &IdentityState, name: &str) -> PendingJoin {
+    PendingJoin {
+        workspace: record.workspace.clone(),
+        invite_id: record.id.clone(),
+        secret: hex::encode(secret),
+        secret_hash: record.secret_hash.clone(),
+        workspace_name: name.into(),
+        owner: owner.clone(),
+        via: None,
+        expires: record.expires,
+        added: now(),
+        last_attempt: None,
+        last_error: None,
+        status: JoinStatus::Trying,
     }
 }
 
@@ -206,16 +227,8 @@ async fn sharing_with_other_people() {
 
     // Sam invites Alex as an editor and Val as a viewer.
     let mut invite = |role: Role, id: &str| {
-        let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, id, role, "", 600_000)).unwrap();
-        PendingJoin {
-            invite: record,
-            secret: hex::encode(secret),
-            workspace_name: "Team".into(),
-            owner: sam.clone(),
-            added: now(),
-            last_attempt: None,
-            last_error: None,
-        }
+        let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, id, role, "", 600_000, false)).unwrap();
+        pending(&record, secret, &sam, "Team")
     };
     let (alex_invite, val_invite) = (invite(Role::Editor, "inv-a"), invite(Role::Viewer, "inv-v"));
     drop(team);
@@ -293,6 +306,138 @@ async fn sharing_with_other_people() {
 /// both keys sign). The fresh computer gets the workspace from its sibling,
 /// Sam sees one Alex rather than two, and the new account's edits count.
 /// Then Sam does the same with his own account: ownership changes hands.
+/// A short link names only the owner; the invite asks for approval. The
+/// joiner waits, the owner decides, the next try finishes the job.
+#[tokio::test(flavor = "multi_thread")]
+async fn short_links_and_approval() {
+    use crate::invite::{read_invite, Link};
+    let (sam_key, sam_dev, sam) = person(1, 11, "Sam");
+    let (alex_key, alex_dev, alex) = person(2, 12, "Alex");
+    let (zed_key, zed_dev, zed) = person(4, 14, "Zed");
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let cs = ctx(dirs[0].path(), &sam_key, &sam_dev, &sam);
+    let ca = ctx(dirs[1].path(), &alex_key, &alex_dev, &alex);
+    let cz = ctx(dirs[2].path(), &zed_key, &zed_dev, &zed);
+    let (ep_s, ep_a, ep_z) = (endpoint(&sam_dev).await, endpoint(&alex_dev).await, endpoint(&zed_dev).await);
+
+    let mut team = Workspace::create(&cs.root, "team", &manifest("Team").save(), &sam_dev).unwrap();
+    team.ensure_members(&sam).unwrap();
+    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "00112233aabbccdd", Role::Editor, "friends", 600_000, true)).unwrap();
+    drop(team);
+    // One link, sealed under a passphrase, handed to two people.
+    let link = Link::sealed(&sam.user, &key_id(&sam_dev.verifying_key()), None, &record.id, record.expires, &secret, "PASS-WORD").unwrap().encode().unwrap();
+    assert!(read_invite(&link, None, &alex.user).unwrap_err().contains("passphrase"));
+    assert!(read_invite(&link, Some("nope"), &alex.user).is_err());
+    let join = read_invite(&link, Some("pass-word"), &alex.user).unwrap();
+    assert!(join.workspace.is_empty() && join.owner.certs.is_empty(), "the link carries only the owner's key");
+    ca.joins.add(join.clone());
+
+    // First contact: held for approval. Alex learns the workspace and Sam's identity; nothing else moves.
+    let (got, _) = sync_with_join(&ca, &ep_a, &cs, &ep_s, Some(join.request())).await.unwrap();
+    assert!(got.joins_changed && names(&ca).is_empty(), "{got:?}");
+    let held = ca.joins.list().remove(0);
+    assert_eq!((held.status, held.workspace.as_str(), held.workspace_name.as_str()), (JoinStatus::Waiting, "team", "Team"));
+    assert!(held.owner.certs.contains_key(&key_id(&sam_dev.verifying_key())));
+    let asks = cs.approvals.list();
+    assert_eq!(asks.len(), 1);
+    assert_eq!((asks[0].name().as_str(), asks[0].role, asks[0].workspace.as_str()), ("Alex", Role::Editor, "team"));
+    // Retrying before Sam decides changes nothing.
+    sync_with_join(&ca, &ep_a, &cs, &ep_s, Some(held.request())).await.unwrap();
+    assert_eq!(cs.approvals.list().len(), 1);
+
+    // Sam approves: Alex is in on the next try.
+    cs.decide_join(&record.id, &alex.user, true).unwrap();
+    assert!(cs.approvals.list().is_empty());
+    cs.open.lock().unwrap().clear();
+    let (got, _) = sync_with_join(&ca, &ep_a, &cs, &ep_s, Some(held.request())).await.unwrap();
+    assert!(got.new_workspaces, "{got:?}");
+    assert_eq!(names(&ca), vec!["Team"]);
+    assert_eq!(role_of(&ca, "team", &alex.user), Some(Role::Editor));
+
+    // Zed uses the same link; Sam declines, and Zed's device stops asking.
+    let zjoin = read_invite(&link, Some("PASS WORD"), &zed.user).unwrap();
+    cz.joins.add(zjoin.clone());
+    let r = sync_with_join(&cz, &ep_z, &cs, &ep_s, Some(zjoin.request())).await;
+    assert!(r.is_err(), "the invite is used up once Alex is in: {r:?}");
+    assert!(cs.approvals.list().is_empty());
+    // A fresh invite for Zed, declined.
+    let mut team = Workspace::open(&cs.root, "team").unwrap();
+    let (record2, secret2) = team.update_members(|m| m.create_invite(&sam_key, "0011223344556677", Role::Viewer, "", 600_000, true)).unwrap();
+    drop(team);
+    cs.open.lock().unwrap().clear();
+    let link2 = Link::new(&sam.user, &key_id(&sam_dev.verifying_key()), None, &record2.id, record2.expires, &secret2).encode().unwrap();
+    let zjoin = read_invite(&link2, None, &zed.user).unwrap();
+    cz.joins.add(zjoin.clone());
+    sync_with_join(&cz, &ep_z, &cs, &ep_s, Some(zjoin.request())).await.unwrap();
+    assert_eq!(cs.approvals.list().len(), 1);
+    cs.decide_join(&record2.id, &zed.user, false).unwrap();
+    let r = sync_with_join(&cz, &ep_z, &cs, &ep_s, Some(zjoin.request())).await;
+    assert!(r.unwrap_err().contains("declined"));
+    assert!(names(&cz).is_empty());
+}
+
+/// Pins live in a private doc per member. A viewer's two devices share it;
+/// the owner, who gets every other doc, never sees it.
+#[tokio::test(flavor = "multi_thread")]
+async fn private_docs_stay_with_their_owner() {
+    use notes_core::workspace::{private_doc_id, PRIVATE};
+    let (sam_key, sam_dev, sam) = person(1, 11, "Sam");
+    let (val_key, val_dev, mut val) = person(3, 13, "Val");
+    // Val's second device.
+    let val_dev2 = key(23);
+    val.certs.insert(key_id(&val_dev2.verifying_key()), DeviceCert::issue(&val_key, &val_dev2.verifying_key(), "phone").unwrap());
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let cs = ctx(dirs[0].path(), &sam_key, &sam_dev, &sam);
+    let cv = ctx(dirs[1].path(), &val_key, &val_dev, &val);
+    let cv2 = ctx(dirs[2].path(), &val_key, &val_dev2, &val);
+    let (ep_s, ep_v, ep_v2) = (endpoint(&sam_dev).await, endpoint(&val_dev).await, endpoint(&val_dev2).await);
+
+    let mut team = Workspace::create(&cs.root, "team", &manifest("Team").save(), &sam_dev).unwrap();
+    team.ensure_members(&sam).unwrap();
+    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "inv-v", Role::Viewer, "", 600_000, false)).unwrap();
+    let invite = pending(&record, secret, &sam, "Team");
+    drop(team);
+    cv.joins.add(invite.clone());
+    sync_with_join(&cv, &ep_v, &cs, &ep_s, Some(invite.request())).await.unwrap();
+    assert_eq!(role_of(&cv, "team", &val.user), Some(Role::Viewer));
+
+    // Val pins something: a change to her private doc, as a viewer.
+    let pins_id = private_doc_id(&val.user);
+    {
+        let mut ws = Workspace::open(&cv.root, "team").unwrap();
+        let mut d = AutoCommit::new();
+        let list = d.put_object(&ROOT, "pins", ObjType::List).unwrap();
+        d.insert(&list, 0, "node:abc").unwrap();
+        ws.create_doc(&val_dev, &pins_id, PRIVATE, &d.save(), "private.create").unwrap();
+        // A note can't be made by a viewer, but a private doc can.
+        let mut n = AutoCommit::new();
+        n.put(&ROOT, "title", "Val's note").unwrap();
+        assert!(ws.create_doc(&val_dev, "n1", "note", &n.save(), "note.create").is_ok(), "core doesn't gate by role; sync does");
+    }
+    cv.open.lock().unwrap().remove("team");
+
+    // Her other device gets the workspace, pins included, from her (a
+    // workspace only arrives from your own devices or by invite).
+    sync(&cv2, &ep_v2, &cv, &ep_v).await.unwrap();
+    assert_eq!(names(&cv2), vec!["Team"]);
+    sync(&cv2, &ep_v2, &cs, &ep_s).await.unwrap();
+    {
+        let mut ws = Workspace::open(&cv2.root, "team").unwrap();
+        let bytes = ws.load_doc(&pins_id).expect("pins reached the other device");
+        let d = automerge::Automerge::load(&bytes).unwrap();
+        assert_eq!(notes_core::docs::get_string_list(&d, &ROOT, "pins").unwrap(), vec!["node:abc"]);
+        assert!(ws.load_doc("n1").is_err(), "a viewer's note is refused even between her own devices");
+    }
+
+    // Sam never receives the private doc, and the viewer's private.* events don't poison her chain for him.
+    let (_, got_s) = sync(&cv, &ep_v, &cs, &ep_s).await.unwrap();
+    assert!(got_s.problems.iter().all(|p| !p.contains("private")), "{:?}", got_s.problems);
+    let mut ws = Workspace::open(&cs.root, "team").unwrap();
+    assert!(ws.load_doc(&pins_id).is_err(), "Sam has Val's pins");
+    let events = ws.events(100, 0).unwrap();
+    assert!(events.iter().any(|e| e.action == "private.create" && e.device == key_id(&val_dev.verifying_key())), "the event itself is fine to hold");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn linking_folds_one_account_into_another() {
     use notes_core::identity::Succession;
@@ -305,9 +450,9 @@ async fn linking_folds_one_account_into_another() {
 
     let mut team = Workspace::create(&cs.root, "team", &manifest("Team").save(), &sam_dev).unwrap();
     team.ensure_members(&sam).unwrap();
-    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "inv", Role::Editor, "", 600_000)).unwrap();
+    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "inv", Role::Editor, "", 600_000, false)).unwrap();
     drop(team);
-    let join = PendingJoin { invite: record, secret: hex::encode(secret), workspace_name: "Team".into(), owner: sam.clone(), added: now(), last_attempt: None, last_error: None };
+    let join = pending(&record, secret, &sam, "Team");
     ca.joins.add(join.clone());
     sync_with_join(&ca, &ep_a, &cs, &ep_s, Some(join.request())).await.unwrap();
     assert_eq!(names(&ca), vec!["Team"]);
@@ -378,18 +523,10 @@ async fn update_files_between_people() {
 
     let mut team = Workspace::create(&cs.root, "team", &manifest("Team").save(), &sam_dev).unwrap();
     team.ensure_members(&sam).unwrap();
-    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "inv", Role::Editor, "", 600_000)).unwrap();
+    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "inv", Role::Editor, "", 600_000, false)).unwrap();
     drop(team);
     Workspace::create(&cs.root, "private", &manifest("Private").save(), &sam_dev).unwrap();
-    let join = PendingJoin {
-        invite: record,
-        secret: hex::encode(secret),
-        workspace_name: "Team".into(),
-        owner: sam.clone(),
-        added: now(),
-        last_attempt: None,
-        last_error: None,
-    };
+    let join = pending(&record, secret, &sam, "Team");
     ca.joins.add(join.clone());
     sync_with_join(&ca, &ep_a, &cs, &ep_s, Some(join.request())).await.unwrap();
 
@@ -398,9 +535,9 @@ async fn update_files_between_people() {
     let path = dirs[2].path().join("u.notesupdate");
     let (b, to) = cs.export_bundle(&["team".into()], Some(&alex.user)).unwrap();
     bundle::write_for(&path, &to.unwrap(), &b).unwrap();
-    assert!(bundle::read(&path, &key(4)).is_err(), "only Alex can open it");
-    assert!(bundle::read(&path, &sam_key).is_err(), "not even Sam");
-    let got = ca.import_bundle(bundle::read(&path, &alex_key).unwrap()).unwrap();
+    assert!(bundle::read(&path, &key(4), None).is_err(), "only Alex can open it");
+    assert!(bundle::read(&path, &sam_key, None).is_err(), "not even Sam");
+    let got = ca.import_bundle(bundle::read(&path, &alex_key, None).unwrap()).unwrap();
     assert_eq!(got.from, "Sam (laptop)");
     assert_eq!(name_of(&ca, "team"), "Offline edit");
 
@@ -411,7 +548,7 @@ async fn update_files_between_people() {
     rename(&ca, "team", "Reply");
     let (b, to) = ca.export_bundle(&["team".into()], Some(&sam.user)).unwrap();
     bundle::write_for(&path, &to.unwrap(), &b).unwrap();
-    cs.import_bundle(bundle::read(&path, &sam_key).unwrap()).unwrap();
+    cs.import_bundle(bundle::read(&path, &sam_key, None).unwrap()).unwrap();
     assert_eq!(name_of(&cs, "team"), "Reply");
 }
 

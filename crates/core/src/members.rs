@@ -149,6 +149,9 @@ pub struct InviteRecord {
     pub expires: i64,
     pub issued: i64,
     pub cancelled: bool,
+    /// The owner approves each person who redeems it before they're added.
+    #[serde(default)]
+    pub approve: bool,
     pub sig: String,
 }
 
@@ -162,6 +165,8 @@ struct InviteFields<'a> {
     expires: i64,
     issued: i64,
     cancelled: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    approve: bool,
 }
 
 impl InviteRecord {
@@ -175,6 +180,7 @@ impl InviteRecord {
             expires: self.expires,
             issued: self.issued,
             cancelled: self.cancelled,
+            approve: self.approve,
         }
     }
 
@@ -237,6 +243,7 @@ pub struct InviteView {
     /// "open", "used", "expired", or "cancelled".
     pub status: &'static str,
     pub used_by: Option<String>,
+    pub approve: bool,
 }
 
 impl Members {
@@ -441,6 +448,14 @@ impl Members {
     /// Whether an event signed by `device` at `ts` counts in this workspace.
     /// `action` is the event's action: a few are the owner's alone.
     pub fn trusts_event(&self, device: &str, ts: i64, action: &str, own: &IdentityState) -> bool {
+        // Private docs (pins and the like) are each member's own and never
+        // leave their devices, so viewers may log changes to them too. The
+        // docs themselves only travel between a member's own devices.
+        if action.starts_with("private.") {
+            return self
+                .device_users(device, own)
+                .any(|ids| ids.trusted_at(device, ts) && self.role(&ids.user).is_some_and(Role::has_access));
+        }
         self.device_users(device, own).any(|ids| {
             ids.trusted_at(device, ts)
                 && self.could_edit_at(&ids.user, ts)
@@ -534,6 +549,7 @@ impl Members {
                     issued: i.issued,
                     status,
                     used_by: used.map(|r| r.user.clone()),
+                    approve: i.approve,
                 }
             })
             .collect();
@@ -611,6 +627,7 @@ impl Members {
         role: Role,
         label: &str,
         valid_for_ms: i64,
+        approve: bool,
     ) -> Result<(InviteRecord, [u8; 32])> {
         self.require_owner(owner)?;
         if !matches!(role, Role::Editor | Role::Viewer) {
@@ -628,6 +645,7 @@ impl Members {
             expires: issued + valid_for_ms,
             issued,
             cancelled: false,
+            approve,
             sig: String::new(),
         };
         invite.sig = sign(owner, "invite", &invite.fields())?;
@@ -797,7 +815,7 @@ mod tests {
         let (_, _, xid) = person(2, 12, "Alex");
         let mut m = Members::new("w", &oid);
         let now = now_ms();
-        let (inv, secret) = m.create_invite(&owner, "i1", Role::Editor, "Alex", 60_000).unwrap();
+        let (inv, secret) = m.create_invite(&owner, "i1", Role::Editor, "Alex", 60_000, false).unwrap();
         assert!(m.check_invite("i1", b"wrong", now).is_err());
         assert_eq!(m.check_invite("i1", &secret, now).unwrap().role, Role::Editor);
 
@@ -805,11 +823,11 @@ mod tests {
         assert!(m.check_invite("i1", &secret, now).is_err(), "used once");
         assert_eq!(m.invites_view(now)[0].status, "used");
 
-        let (_, s2) = m.create_invite(&owner, "i2", Role::Viewer, "", 60_000).unwrap();
+        let (_, s2) = m.create_invite(&owner, "i2", Role::Viewer, "", 60_000, false).unwrap();
         m.cancel_invite(&owner, "i2").unwrap();
         assert!(m.check_invite("i2", &s2, now).is_err());
 
-        let (_, s3) = m.create_invite(&owner, "i3", Role::Viewer, "", 1_000).unwrap();
+        let (_, s3) = m.create_invite(&owner, "i3", Role::Viewer, "", 1_000, false).unwrap();
         assert!(m.check_invite("i3", &s3, now + 5_000).is_err(), "expired");
 
         // Members other than the owner never receive invites.

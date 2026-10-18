@@ -20,24 +20,35 @@ Roles apply to a whole workspace.
 1. **Settings → Sharing**, and pick the workspace at the top. (From **Settings → Workspaces**,
    the people icon on a workspace goes straight there.)
 2. Under **Invite someone**, enter who it's for, choose **Edit** or **View only**, and how long the
-   link should work (1, 7, or 30 days).
-3. **Create invite link**, then **Copy invite link** and send it to them privately.
+   link should work (an hour, a day, a week, or a month).
+3. Leave **Ask me before they're added** on unless you trust the channel completely: when someone
+   uses the link, you get to see who it is and approve or decline them. Tick **Protect with a
+   passphrase** to get a link that's useless by itself: the passphrase is shown once, for you to
+   read to them or send another way.
+4. **Create invite link**, then **Copy invite link** and send it to them.
 
-An invite link works once. Whoever uses it first joins, so treat it like a password: send it over
-something private, and cancel it under **Invites** if it might have gone astray. The label is just
-for you; it isn't checked.
+An invite link works once. Whoever uses it first gets in (or gets to ask), so treat it like a
+password: send it over something private, and cancel it under **Invites** if it might have gone
+astray. The label is just for you; it isn't checked.
 
-The link holds the invite, a one-time secret, the workspace's name, and how to reach your
-devices. It doesn't hold any of the workspace's content.
+The link is short, about 150 characters: your account key, which of your devices made it and
+its relay, the invite id, when it expires, and the one-time secret. Nothing about the workspace,
+not even its name; that comes from your device at the first contact.
+
+When someone is waiting on you, a message points to **Waiting for your approval** on the Sharing
+page, with their name and their full account fingerprint. The name is whatever they typed; the
+fingerprint is theirs alone, so for anything that matters, read it back to them over a call.
 
 ## Join a workspace
 
 1. **Settings → Workspaces → Join a shared workspace** (or on the start screen).
-2. Paste the invite link and **Join**.
+2. Paste the invite link, the passphrase if it has one, and **Join**.
 
-Your device then tries to reach the owner's devices. The first time it does, the owner's device
-checks the invite and adds you, and the workspace arrives. If the owner is offline, the join waits
-under **Waiting to join** and retries in the background while the app is open.
+Your device then tries to reach the device that made the link. The first time it does, the
+owner's device checks the invite and either adds you, so the workspace arrives, or holds the
+request for the owner to approve: **Waiting to join** then says so, and your device tries again
+every so often until they decide. If the owner is offline, the join waits and retries in the
+background while the app is open.
 
 Before joining, know who it's from. Joining tells the owner, and everyone else in the workspace,
 your name, your device IDs, and the network addresses your devices sync from.
@@ -110,6 +121,9 @@ from **Settings → Devices**.
   from that person's identity before then.
 - **Update files for a person** are sealed to their box key, an X25519 key derived from their
   user key and published, signed, in their identity. Each file uses a fresh sender key.
+- **Pins** live in a private doc per member (`private-<user key>`), which syncs between that
+  member's own devices only: other people's devices never receive it and refuse it if sent.
+  Viewers can write theirs; `private.*` events are trusted from any member with access.
 
 ## Limits
 

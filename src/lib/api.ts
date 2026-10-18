@@ -33,6 +33,8 @@ export interface ShareInvite {
   issued: number;
   status: "open" | "used" | "expired" | "cancelled";
   usedBy: string | null;
+  /** The owner approves each person who uses it. */
+  approve: boolean;
 }
 
 export interface ShareInfo {
@@ -44,14 +46,18 @@ export interface ShareInfo {
 }
 
 export interface JoinView {
+  /** The invite id: what to cancel by. */
+  id: string;
+  /** Empty until the owner has answered. */
   workspace: string;
   workspaceName: string;
   ownerName: string;
-  role: Role;
   added: number;
   expires: number;
   lastAttempt: number | null;
   lastError: string | null;
+  /** trying: dialing the owner. waiting: the owner has to approve. declined: they said no. */
+  status: "trying" | "waiting" | "declined";
 }
 
 export interface Contact {
@@ -163,6 +169,18 @@ export interface JoinPreview {
   workspaces: { id: string; name: string; kind: "own" | "shared" | "member"; people: string[] }[];
 }
 
+export interface ApprovalView {
+  workspace: string;
+  workspaceName: string;
+  invite: string;
+  user: string;
+  name: string;
+  role: Role;
+  asked: number;
+  /** Their user key, to read back to them over another channel. */
+  fingerprint: string;
+}
+
 export interface InviteView {
   code: string;
   passphrase: string;
@@ -222,6 +240,10 @@ export interface SyncApplied {
   /** Workspaces another of your devices deleted. */
   removedWorkspaces: string[];
   problems: string[];
+  /** Someone new is waiting for your approval to join. */
+  approvalsChanged?: boolean;
+  /** A join this device is making moved on. */
+  joinsChanged?: boolean;
 }
 
 export type ClaudeAccess = "editor" | "viewer" | "none";
@@ -287,9 +309,18 @@ export const api = {
   joinWithCode: (code: string, passphrase: string) => invoke<AccountView>("join_with_code", { code, passphrase }),
   revokeDevice: (device: string) => invoke<AccountView>("revoke_device", { device }),
   /** `recipient` is a person's user ID; leave it out for your own devices. */
-  exportUpdate: (path: string, workspaceIds: string[], recipient?: string) =>
-    invoke<{ workspaces: number; bytes: number }>("export_update", { path, workspaceIds, recipient: recipient ?? null }),
-  importUpdate: (path: string) => invoke<ImportView>("import_update", { path }),
+  /** The system print dialog for this window (Save as PDF lives there). */
+  printWindow: () => invoke<void>("print_window"),
+  /** Whether an update file needs a passphrase to open. */
+  inspectUpdate: (path: string) => invoke<boolean>("inspect_update", { path }),
+  exportUpdate: (path: string, workspaceIds: string[], recipient?: string, passphrase?: boolean) =>
+    invoke<{ workspaces: number; bytes: number; passphrase: string | null }>("export_update", {
+      path,
+      workspaceIds,
+      recipient: recipient ?? null,
+      passphrase: passphrase ?? false,
+    }),
+  importUpdate: (path: string, passphrase?: string) => invoke<ImportView>("import_update", { path, passphrase: passphrase ?? null }),
   syncStatus: () => invoke<SyncStatus>("sync_status"),
   syncNow: () => invoke<SyncStatus>("sync_now"),
   setSyncSettings: (settings: SyncSettings) => invoke<SyncStatus>("set_sync_settings", { settings }),
@@ -340,13 +371,18 @@ export const api = {
   verifyLog: (workspaceId: string) => invoke<VerifyReport>("verify_log", { workspaceId }),
 
   shareInfo: (workspaceId: string) => invoke<ShareInfo>("share_info", { workspaceId }),
-  createInvite: (workspaceId: string, role: "editor" | "viewer", label: string, days: number) =>
-    invoke<{ token: string; info: ShareInfo }>("create_invite", { workspaceId, role, label, days }),
+  createInvite: (workspaceId: string, role: "editor" | "viewer", label: string, hours: number, approve: boolean, passphrase: boolean) =>
+    invoke<{ token: string; passphrase: string | null; info: ShareInfo }>("create_invite", { workspaceId, role, label, hours, approve, passphrase }),
   cancelInvite: (workspaceId: string, invite: string) => invoke<ShareInfo>("cancel_invite", { workspaceId, invite }),
   setMemberRole: (workspaceId: string, user: string, role: "editor" | "viewer" | "removed") =>
     invoke<ShareInfo>("set_member_role", { workspaceId, user, role }),
-  joinShared: (token: string) => invoke<JoinView>("join_shared", { token }),
+  /** Whether an invite link needs a passphrase. */
+  inspectInvite: (token: string) => invoke<boolean>("inspect_invite", { token }),
+  joinShared: (token: string, passphrase?: string) => invoke<JoinView>("join_shared", { token, passphrase: passphrase ?? null }),
   listJoins: () => invoke<JoinView[]>("list_joins"),
-  cancelJoin: (workspace: string) => invoke<JoinView[]>("cancel_join", { workspace }),
+  cancelJoin: (id: string) => invoke<JoinView[]>("cancel_join", { id }),
+  /** People who used an invite that needs your approval. */
+  listApprovals: () => invoke<ApprovalView[]>("list_approvals"),
+  decideJoin: (invite: string, user: string, approve: boolean) => invoke<ApprovalView[]>("decide_join", { invite, user, approve }),
   shareContacts: () => invoke<Contact[]>("share_contacts"),
 };

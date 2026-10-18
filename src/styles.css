@@ -7229,3 +7229,137 @@ kbd {
 .prose a[href^="page:"]:hover {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
+
+/* A pin kept on this device only. */
+.pin-row .pin-device {
+  width: 12px;
+  height: 12px;
+  margin-left: 0.3rem;
+  color: var(--ink-3, var(--ink-2));
+  opacity: 0.7;
+  flex: none;
+}
+
+/* Invite form checkboxes and the passphrase shown once. */
+.setting-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.5rem;
+}
+.setting-check input {
+  margin: 0;
+}
+.invite-pass {
+  margin: 0.5rem 0 0;
+}
+.invite-pass code {
+  font-size: 1rem;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--r-sm);
+  background: var(--hover);
+}
+.invite-row .row-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex: none;
+}
+
+/* A whole key, wrapped in groups of four so it can be read out. */
+.fp-full {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+  max-width: 34ch;
+  display: inline-block;
+}
+
+/* Print (and Save as PDF): just the note, on white, flowing across pages. ----- */
+@media print {
+  :root,
+  :root[data-theme="dark"] {
+    --canvas: #fff;
+    --ink: #111;
+    --ink-2: #444;
+    --rule: #bbb;
+    background: #fff;
+  }
+  html,
+  body,
+  #root,
+  .app,
+  .main,
+  .note-page,
+  .note-layout {
+    display: block;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    background: #fff;
+  }
+  .rail,
+  .item-top,
+  .outline,
+  .toolbar,
+  .toolbar-float,
+  .pin-toggle,
+  .tool,
+  .item-links .picker,
+  .tags .picker,
+  .tag button,
+  .link-chip-x,
+  .tag-input,
+  .block-grip,
+  .code-head .code-copy,
+  .toast,
+  .rail-open,
+  .rail-resize {
+    display: none !important;
+  }
+  .app[data-rail="collapsed"] .main,
+  .main {
+    padding: 0;
+  }
+  .editor {
+    max-width: none;
+    margin: 0;
+    padding: 0.5in 0.25in;
+    color: #111;
+  }
+  .note-title {
+    color: #111;
+  }
+  .prose {
+    color: #111;
+  }
+  .prose pre,
+  .code-block pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid #ccc;
+    background: #f6f6f6;
+  }
+  .prose a[href^="page:"] {
+    background: none;
+    border-bottom: 1px solid #999;
+  }
+  .prose a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.85em;
+    color: #555;
+  }
+  .panel,
+  .expand,
+  .image-block,
+  table,
+  pre {
+    break-inside: avoid;
+  }
+  h1, h2, h3 {
+    break-after: avoid;
+  }
+  /* Collapsed expands print open: a PDF can't be clicked. */
+  .prose .expand:not([data-open]) .expand-body {
+    display: block;
+  }
+}

@@ -120,10 +120,11 @@ fn status(state: &AppState) -> CmdResult<ClaudeStatus> {
     let own = own_identity(state)?;
     let claude = claude_identity();
     let dir = claude_dir()?;
+    // Joins Claude's connection has picked up but not finished, by invite id.
     let waiting_joins: Vec<String> = notes_peer::sync::Joins::load(dir.join("joins.json"))
         .list()
         .into_iter()
-        .map(|j| j.invite.workspace)
+        .map(|j| j.invite_id)
         .collect();
     let mut workspaces = Vec::new();
     for w in notes_core::list_workspaces(&state.root).map_err(|e| e.to_string())? {
@@ -134,7 +135,7 @@ fn status(state: &AppState) -> CmdResult<ClaudeStatus> {
             let letter = inbox::get(&dir, &w.id);
             // An invite in the inbox, or picked up but not yet redeemed.
             let invited = letter.as_ref().is_some_and(|l| m.invites_view(now()).iter().any(|i| i.id == l.invite && i.status == "open"))
-                || waiting_joins.contains(&w.id);
+                || m.invites.keys().any(|i| waiting_joins.contains(i));
             Ok(ClaudeWorkspace {
                 id: w.id.clone(),
                 name,
@@ -212,7 +213,8 @@ pub async fn claude_set_access(state: State<'_, AppState>, workspace_id: String,
     // New to Claude: replace any invite still waiting with one for this role.
     cancel_letter(&state, &dir, &workspace_id);
     if let Some(role) = role {
-        let (token, invite, _) = make_invite(&state, &workspace_id, role, "Claude", 30)?;
+        // Your own Claude needs no approval or passphrase: you're handing it the link yourself.
+        let (token, invite, _) = make_invite(&state, &workspace_id, role, "Claude", 30 * 24, false, None)?;
         inbox::put(&dir, &workspace_id, &Letter { token, invite })?;
     }
     status(&state)

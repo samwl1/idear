@@ -98,6 +98,7 @@ impl Peer {
             account: Arc::new(Mutex::new(account)),
             open: Arc::new(Mutex::new(HashMap::new())),
             joins: Arc::new(Joins::load(dir.join("joins.json"))),
+            approvals: Arc::new(notes_peer::sync::Approvals::load(dir.join("approvals.json"))),
         };
         let service = SyncService::new(ctx.clone(), dir.join("sync.json"), Arc::new(|_| {}));
         Ok(Self { ctx, service, last_sync: Mutex::new(None), dir: dir.to_path_buf(), _lock: lock })
@@ -113,7 +114,7 @@ impl Peer {
         let Ok(own) = self.own() else { return 0 };
         let mut n = 0;
         for (path, token) in notes_peer::inbox::read(&self.dir) {
-            match notes_peer::invite::read_invite(&token, &own.user) {
+            match notes_peer::invite::read_invite(&token, None, &own.user) {
                 Ok(pending) => {
                     self.service.joins().add(pending);
                     n += 1;

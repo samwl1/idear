@@ -34,7 +34,7 @@ use iroh::endpoint::{presets, Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, RelayMode, RelayUrl, SecretKey};
 use notes_core::bundle::{Bundle, WorkspaceBundle};
 use notes_core::identity::{key_id, AddrRecord, IdentityState};
-use notes_core::members::{InviteRecord, MemberRecord, Members, Role};
+use notes_core::members::{MemberRecord, Members, Role};
 use notes_core::{Workspace, WorkspaceImport, WorkspaceSummary};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -67,14 +67,26 @@ fn now() -> i64 {
 
 // ---- wire messages ------------------------------------------------------------
 
-/// Redeem an invite: the secret from the invite link.
+/// Redeem an invite: the secret from the invite link. The owner finds the
+/// workspace by the invite id; `workspace` is a hint once the joiner knows it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JoinRequest {
+    #[serde(default)]
     pub workspace: String,
     pub invite: String,
     /// Hex of the 32-byte invite secret.
     pub secret: String,
+}
+
+/// The owner has the request and will decide; try again later.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Waiting {
+    pub workspace: String,
+    pub workspace_name: String,
+    pub owner: IdentityState,
+    pub role: Role,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,6 +105,8 @@ struct Intro {
 enum Reply {
     Welcome(Intro),
     Refused(String),
+    /// A join that needs the owner's say-so: nothing else is exchanged yet.
+    Waiting(Waiting),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,6 +141,12 @@ pub(crate) enum Peer {
 }
 
 impl Peer {
+    pub(crate) fn is_own(&self) -> bool {
+        matches!(self, Peer::Own)
+    }
+}
+
+impl Peer {
     fn user<'a>(&'a self, own: &'a IdentityState) -> &'a str {
         match self {
             Peer::Own => &own.user,
@@ -148,6 +168,12 @@ pub struct Applied {
     /// Workspaces another of your devices deleted, now in this one's trash.
     pub removed_workspaces: BTreeSet<String>,
     pub problems: Vec<String>,
+    /// Someone new is waiting for this owner's approval.
+    #[serde(default)]
+    pub approvals_changed: bool,
+    /// A join this device is making moved on (the owner answered).
+    #[serde(default)]
+    pub joins_changed: bool,
     /// Per-workspace detail, for update files.
     #[serde(skip)]
     pub reports: Vec<WorkspaceImport>,
@@ -160,34 +186,63 @@ impl Applied {
             && !self.identity_changed
             && self.members_changed.is_empty()
             && self.removed_workspaces.is_empty()
+            && !self.approvals_changed
+            && !self.joins_changed
     }
-
 }
 
 // ---- pending joins -----------------------------------------------------------------
+
+/// How to reach the owner before their identity is known: the device that
+/// made the link, and its relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Via {
+    pub device: String,
+    pub relay: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum JoinStatus {
+    /// Dialing the owner's devices until one answers.
+    #[default]
+    Trying,
+    /// The owner has it and hasn't decided yet.
+    Waiting,
+    /// The owner said no. Kept so the app can say so; removed when dismissed.
+    Declined,
+}
 
 /// An invite this device is redeeming, retried until the owner is online.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingJoin {
-    pub invite: InviteRecord,
+    /// Empty until the owner names it.
+    #[serde(default)]
+    pub workspace: String,
+    pub invite_id: String,
     pub secret: String,
+    pub secret_hash: String,
     pub workspace_name: String,
+    /// The owner: just their user key from the link, their whole identity
+    /// once they've answered.
     pub owner: IdentityState,
+    #[serde(default)]
+    pub via: Option<Via>,
+    pub expires: i64,
     pub added: i64,
     #[serde(default)]
     pub last_attempt: Option<i64>,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub status: JoinStatus,
 }
 
 impl PendingJoin {
     pub fn request(&self) -> JoinRequest {
-        JoinRequest {
-            workspace: self.invite.workspace.clone(),
-            invite: self.invite.id.clone(),
-            secret: self.secret.clone(),
-        }
+        JoinRequest { workspace: self.workspace.clone(), invite: self.invite_id.clone(), secret: self.secret.clone() }
     }
 }
 
@@ -214,29 +269,133 @@ impl Joins {
 
     pub fn add(&self, join: PendingJoin) {
         if let Ok(mut l) = self.list.lock() {
-            l.retain(|j| j.invite.workspace != join.invite.workspace);
+            l.retain(|j| j.invite_id != join.invite_id);
             l.push(join);
             self.save(&l);
         }
     }
 
-    pub fn remove(&self, workspace: &str) {
+    /// Drop a join by its invite id, or by the workspace it turned out to be.
+    pub fn remove(&self, id: &str) {
         if let Ok(mut l) = self.list.lock() {
-            l.retain(|j| j.invite.workspace != workspace);
+            l.retain(|j| j.invite_id != id && !(j.workspace == id && !id.is_empty()));
             self.save(&l);
         }
     }
 
-    fn get(&self, workspace: &str) -> Option<PendingJoin> {
-        self.list().into_iter().find(|j| j.invite.workspace == workspace)
-    }
-
-    fn note(&self, workspace: &str, error: Option<String>) {
+    fn note(&self, invite_id: &str, error: Option<String>) {
         if let Ok(mut l) = self.list.lock() {
-            if let Some(j) = l.iter_mut().find(|j| j.invite.workspace == workspace) {
+            if let Some(j) = l.iter_mut().find(|j| j.invite_id == invite_id) {
                 j.last_attempt = Some(now());
                 j.last_error = error;
             }
+            self.save(&l);
+        }
+    }
+
+    /// The owner answered: now the workspace, its name, their identity, and
+    /// whether they still have to approve are known.
+    fn learn(&self, invite_id: &str, w: &Waiting) {
+        if let Ok(mut l) = self.list.lock() {
+            if let Some(j) = l.iter_mut().find(|j| j.invite_id == invite_id) {
+                j.workspace = w.workspace.clone();
+                j.workspace_name = w.workspace_name.clone();
+                if w.owner.user == j.owner.user {
+                    j.owner = w.owner.clone().validated();
+                }
+                j.status = JoinStatus::Waiting;
+                j.last_attempt = Some(now());
+                j.last_error = None;
+            }
+            self.save(&l);
+        }
+    }
+
+    fn set_status(&self, invite_id: &str, status: JoinStatus, error: Option<String>) {
+        if let Ok(mut l) = self.list.lock() {
+            if let Some(j) = l.iter_mut().find(|j| j.invite_id == invite_id) {
+                j.status = status;
+                j.last_attempt = Some(now());
+                j.last_error = error;
+            }
+            self.save(&l);
+        }
+    }
+}
+
+// ---- approvals: people waiting on the owner -------------------------------------
+
+/// Someone redeemed an invite that needs the owner's approval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub workspace: String,
+    pub workspace_name: String,
+    pub invite: String,
+    pub role: Role,
+    /// Their identity as presented; added to the workspace on approval.
+    pub identity: IdentityState,
+    pub asked: i64,
+    /// None until the owner decides.
+    #[serde(default)]
+    pub approved: Option<bool>,
+}
+
+impl Approval {
+    pub fn user(&self) -> &str {
+        &self.identity.user
+    }
+    pub fn name(&self) -> String {
+        self.identity.display_name()
+    }
+}
+
+pub struct Approvals {
+    path: PathBuf,
+    list: Mutex<Vec<Approval>>,
+}
+
+impl Approvals {
+    pub fn load(path: PathBuf) -> Self {
+        let list = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        Self { path, list: Mutex::new(list) }
+    }
+
+    fn save(&self, list: &[Approval]) {
+        if let Ok(bytes) = serde_json::to_vec_pretty(list) {
+            let _ = std::fs::write(&self.path, bytes);
+        }
+    }
+
+    pub fn list(&self) -> Vec<Approval> {
+        self.list.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    fn get(&self, invite: &str, user: &str) -> Option<Approval> {
+        self.list().into_iter().find(|a| a.invite == invite && a.identity.user == user)
+    }
+
+    fn add(&self, a: Approval) {
+        if let Ok(mut l) = self.list.lock() {
+            l.retain(|x| !(x.invite == a.invite && x.identity.user == a.identity.user));
+            l.push(a);
+            self.save(&l);
+        }
+    }
+
+    fn decide(&self, invite: &str, user: &str, approved: bool) -> Option<Approval> {
+        let mut l = self.list.lock().ok()?;
+        let a = l.iter_mut().find(|a| a.invite == invite && a.identity.user == user)?;
+        a.approved = Some(approved);
+        let out = a.clone();
+        self.save(&l);
+        Some(out)
+    }
+
+    /// Forget a decided request (it's answered, or the person was added).
+    pub fn remove(&self, invite: &str, user: &str) {
+        if let Ok(mut l) = self.list.lock() {
+            l.retain(|x| !(x.invite == invite && x.identity.user == user));
             self.save(&l);
         }
     }
@@ -252,6 +411,8 @@ pub struct SyncCtx {
     pub account: Arc<Mutex<Account>>,
     pub open: Arc<Mutex<HashMap<String, Workspace>>>,
     pub joins: Arc<Joins>,
+    /// Joins other people are waiting on this owner to approve.
+    pub approvals: Arc<Approvals>,
 }
 
 impl SyncCtx {
@@ -411,7 +572,7 @@ impl SyncCtx {
             for id in shared {
                 let ws = open.get_mut(id).expect("opened");
                 let members = ws.members().expect("ensured").for_user(&user);
-                workspaces.push(Shared { summary: ws.summary().map_err(err)?, members });
+                workspaces.push(Shared { summary: ws.summary(peer.is_own()).map_err(err)?, members });
             }
             let deleted = match peer {
                 Peer::Own => self.removals(),
@@ -462,10 +623,13 @@ impl SyncCtx {
                     let they = effective.role(&ids.user).is_some_and(Role::has_access);
                     let me = effective.role(&own.user).is_some_and(Role::has_access);
                     // A workspace new to this device only comes from its owner, for an invite we redeemed.
+                    // The join may not know its workspace yet (short links don't
+                    // say); the owner named in the link is what matters.
                     let invited = self
                         .joins
-                        .get(&s.summary.id)
-                        .is_some_and(|j| j.owner.user == ids.user && j.invite.workspace == s.summary.id);
+                        .list()
+                        .iter()
+                        .any(|j| j.owner.user == ids.user && (j.workspace == s.summary.id || j.workspace.is_empty()));
                     they && me && (known || (invited && effective.is_owner(&ids.user)))
                 }
             };
@@ -476,7 +640,7 @@ impl SyncCtx {
         Ok(out)
     }
 
-    fn delta_for(&self, shared: &[String], theirs: &Hello) -> Res<Delta> {
+    fn delta_for(&self, peer: &Peer, shared: &[String], theirs: &Hello) -> Res<Delta> {
         let by_id: BTreeMap<&str, &WorkspaceSummary> =
             theirs.workspaces.iter().map(|w| (w.summary.id.as_str(), &w.summary)).collect();
         self.with_workspaces(|open, _, _| {
@@ -484,7 +648,8 @@ impl SyncCtx {
             for id in shared {
                 // Moved to the trash since the Hello went out.
                 let Some(ws) = open.get_mut(id) else { continue };
-                let d = ws.delta_for(by_id.get(id.as_str()).copied()).map_err(err)?;
+                // Private docs (pins) only go between your own devices.
+                let d = ws.delta_for(by_id.get(id.as_str()).copied(), peer.is_own()).map_err(err)?;
                 if !d.docs.is_empty() || !d.events.is_empty() {
                     out.push(d);
                 }
@@ -493,7 +658,7 @@ impl SyncCtx {
         })
     }
 
-    pub(crate) fn apply(&self, accepted: &BTreeMap<String, (Members, Members)>, removed: &[MemberRecord], delta: &Delta) -> Res<Applied> {
+    pub(crate) fn apply(&self, peer: &Peer, accepted: &BTreeMap<String, (Members, Members)>, removed: &[MemberRecord], delta: &Delta) -> Res<Applied> {
         let own = self.own()?;
         let me = self.me();
         let mut applied = Applied::default();
@@ -518,6 +683,15 @@ impl SyncCtx {
             // Any open copy caches docs that are about to change on disk.
             open.remove(&wb.id);
             let trusted = |d: &str, ts: i64, action: &str| effective.trusts_event(d, ts, action, &own);
+            // Another person's device has no business sending private docs;
+            // drop any that arrive rather than merging them.
+            let stripped;
+            let wb = if peer.is_own() {
+                wb
+            } else {
+                stripped = wb.without_private();
+                &stripped
+            };
             let r = match Workspace::import(&self.root, wb, Some(incoming), &trusted, &me) {
                 Ok(r) => r,
                 Err(e) => {
@@ -556,42 +730,121 @@ impl SyncCtx {
         Ok(applied)
     }
 
-    /// The owner's side of redeeming an invite: check it and add the person.
-    fn accept_join(&self, req: &JoinRequest, theirs: &IdentityState) -> Res<()> {
+    /// Which workspace an invite belongs to, by its id, across everything open here.
+    fn workspace_of_invite(&self, open: &mut HashMap<String, Workspace>, invite: &str) -> Res<String> {
+        for id in open.keys() {
+            if open[id].members().is_some_and(|m| m.invites.contains_key(invite)) {
+                return Ok(id.clone());
+            }
+        }
+        for w in notes_core::list_workspaces(&self.root).map_err(err)? {
+            if open.contains_key(&w.id) {
+                continue;
+            }
+            if let Ok(ws) = Workspace::open(&self.root, &w.id) {
+                if ws.members().is_some_and(|m| m.invites.contains_key(invite)) {
+                    open.insert(w.id.clone(), ws);
+                    return Ok(w.id);
+                }
+            }
+        }
+        Err("That invite doesn't belong to any workspace on this device.".into())
+    }
+
+    /// The owner's side of redeeming an invite: check it, then add the
+    /// person, or hold the request until the owner approves it.
+    fn accept_join(&self, req: &JoinRequest, theirs: &IdentityState) -> Res<JoinOutcome> {
         let own = self.own()?;
         let user_key = self.user_key()?;
         let secret = hex::decode(&req.secret).map_err(|_| "That invite link is damaged.".to_string())?;
         let mut open = self.open.lock().map_err(|_| "workspace lock poisoned")?;
-        if !open.contains_key(&req.workspace) {
-            let ws = Workspace::open(&self.root, &req.workspace)
+        let workspace = if req.workspace.is_empty() { self.workspace_of_invite(&mut open, &req.invite)? } else { req.workspace.clone() };
+        if !open.contains_key(&workspace) {
+            let ws = Workspace::open(&self.root, &workspace)
                 .map_err(|_| "This workspace no longer exists on the owner's device.".to_string())?;
-            open.insert(req.workspace.clone(), ws);
+            open.insert(workspace.clone(), ws);
         }
-        let ws = open.get_mut(&req.workspace).expect("opened");
+        let ws = open.get_mut(&workspace).expect("opened");
         let m = ws.ensure_members(&own).map_err(err)?.clone();
         if !m.is_owner(&own.user) {
             return Err("This device doesn't own that workspace.".into());
         }
         // Already redeemed by this person (e.g. a retry after a dropped connection): fine.
         if m.invite_used_by(&req.invite).is_some_and(|r| r.user == theirs.user) {
-            return Ok(());
+            self.approvals.remove(&req.invite, &theirs.user);
+            return Ok(JoinOutcome::Added(workspace));
         }
-        let role = m.check_invite(&req.invite, &secret, now()).map_err(err)?.role;
+        let invite = m.check_invite(&req.invite, &secret, now()).map_err(err)?.clone();
         if m.role(&theirs.user).is_some_and(Role::has_access) {
             return Err("You already have access to this workspace.".into());
         }
+        if invite.approve {
+            match self.approvals.get(&req.invite, &theirs.user).and_then(|a| a.approved) {
+                Some(true) => {}
+                Some(false) => return Err("The owner declined this request.".into()),
+                None => {
+                    let name = ws.name().map_err(err)?;
+                    self.approvals.add(Approval {
+                        workspace: workspace.clone(),
+                        workspace_name: name.clone(),
+                        invite: req.invite.clone(),
+                        role: invite.role,
+                        identity: theirs.clone(),
+                        asked: now(),
+                        approved: None,
+                    });
+                    return Ok(JoinOutcome::Waiting(Waiting { workspace, workspace_name: name, owner: own.clone(), role: invite.role }));
+                }
+            }
+        }
         let record = ws
-            .update_members(|mm| mm.set_role(&user_key, theirs, role, Some(&req.invite)))
+            .update_members(|mm| mm.set_role(&user_key, theirs, invite.role, Some(&req.invite)))
             .map_err(err)?;
         ws.log_event(
             &self.device,
             "member.add",
             &theirs.user,
-            serde_json::json!({ "name": record.name, "role": role.as_str(), "invite": req.invite }),
+            serde_json::json!({ "name": record.name, "role": invite.role.as_str(), "invite": req.invite }),
         )
         .map_err(err)?;
+        self.approvals.remove(&req.invite, &theirs.user);
+        Ok(JoinOutcome::Added(workspace))
+    }
+
+    /// The owner's answer to someone waiting. Approving adds them right away;
+    /// their device learns on its next try (or when we next reach it).
+    pub fn decide_join(&self, invite: &str, user: &str, approved: bool) -> Res<()> {
+        let a = self.approvals.decide(invite, user, approved).ok_or("That request is gone.")?;
+        if !approved {
+            return Ok(());
+        }
+        let req = JoinRequest { workspace: a.workspace.clone(), invite: invite.to_string(), secret: String::new() };
+        // No secret needed now: the request was checked when it was held.
+        let own = self.own()?;
+        let user_key = self.user_key()?;
+        let mut open = self.open.lock().map_err(|_| "workspace lock poisoned")?;
+        if !open.contains_key(&req.workspace) {
+            let ws = Workspace::open(&self.root, &req.workspace).map_err(|_| "This workspace no longer exists.".to_string())?;
+            open.insert(req.workspace.clone(), ws);
+        }
+        let ws = open.get_mut(&req.workspace).expect("opened");
+        let m = ws.ensure_members(&own).map_err(err)?.clone();
+        if m.invite_used_by(invite).is_some_and(|r| r.user == user) || m.role(user).is_some_and(Role::has_access) {
+            self.approvals.remove(invite, user);
+            return Ok(());
+        }
+        let record = ws.update_members(|mm| mm.set_role(&user_key, &a.identity, a.role, Some(invite))).map_err(err)?;
+        ws.log_event(&self.device, "member.add", user, serde_json::json!({ "name": record.name, "role": a.role.as_str(), "invite": invite }))
+            .map_err(err)?;
+        self.approvals.remove(invite, user);
         Ok(())
     }
+}
+
+/// What redeeming an invite came to.
+pub(crate) enum JoinOutcome {
+    Added(String),
+    Waiting(Waiting),
 }
 
 // ---- update files -----------------------------------------------------------------
@@ -608,6 +861,17 @@ impl SyncCtx {
     /// None), or for one person you share these workspaces with. Returns the
     /// recipient's identity, to seal the file for them.
     pub fn export_bundle(&self, workspace_ids: &[String], recipient: Option<&str>) -> Res<(Bundle, Option<IdentityState>)> {
+        let (bundle, to) = self.export_bundle_unsealed(workspace_ids, recipient)?;
+        if recipient.is_some() && to.is_none() {
+            return Err("This app doesn't know that person's devices yet. Sync with them once first.".into());
+        }
+        Ok((bundle, to))
+    }
+
+    /// Like `export_bundle`, but fine with not knowing the recipient's key
+    /// (for a file sealed under a passphrase instead). The contents are the
+    /// same: only what you share with them.
+    pub fn export_bundle_unsealed(&self, workspace_ids: &[String], recipient: Option<&str>) -> Res<(Bundle, Option<IdentityState>)> {
         let (workspaces, members, to) = self.with_workspaces(|open, ids, own| {
             let mut workspaces = Vec::new();
             let mut members = BTreeMap::new();
@@ -638,13 +902,10 @@ impl SyncCtx {
                         members.insert(id.clone(), m.for_user(user));
                     }
                 }
-                workspaces.push(ws.export().map_err(err)?);
+                workspaces.push(ws.export(recipient.is_none()).map_err(err)?);
             }
             Ok((workspaces, members, to))
         })?;
-        if recipient.is_some() && to.is_none() {
-            return Err("This app doesn't know that person's devices yet. Sync with them once first.".into());
-        }
         let bundle = Bundle { created_by: self.me(), created: now(), identity: self.own()?, workspaces, members };
         Ok((bundle, to))
     }
@@ -676,7 +937,7 @@ impl SyncCtx {
             });
         }
         let ids: Vec<String> = accepted.keys().cloned().collect();
-        let mut applied = self.apply(&accepted, &[], &Delta { workspaces: b.workspaces })?;
+        let mut applied = self.apply(&peer, &accepted, &[], &Delta { workspaces: b.workspaces })?;
         applied.identity_changed |= identity_changed;
         if let Peer::Other(theirs) = &peer {
             self.with_workspaces(|open, _, _| {
@@ -746,13 +1007,13 @@ async fn exchange(
     }
 
     let accepted = { let (c, p, t) = (ctx.clone(), peer.clone(), theirs.clone()); blocking(move || c.accepted(&p, &t)).await? };
-    let delta = { let (c, s, t) = (ctx.clone(), shared.clone(), theirs.clone()); blocking(move || c.delta_for(&s, &t)).await? };
+    let delta = { let (c, p, s, t) = (ctx.clone(), peer.clone(), shared.clone(), theirs.clone()); blocking(move || c.delta_for(&p, &s, &t)).await? };
     let (wrote, got) = tokio::join!(write_frame(send, &delta), read_frame::<Delta>(recv, DELTA_LIMIT));
     wrote?;
     let incoming = got?;
     send.finish().map_err(err)?;
-    let c = ctx.clone();
-    let mut applied = blocking(move || c.apply(&accepted, &theirs.removed, &incoming)).await?;
+    let (c, p) = (ctx.clone(), peer.clone());
+    let mut applied = blocking(move || c.apply(&p, &accepted, &theirs.removed, &incoming)).await?;
     applied.removed_workspaces.extend(moved.0);
     applied.new_workspaces |= !moved.1.is_empty();
     // Closing before the peer has everything we sent would cut it off.
@@ -771,10 +1032,24 @@ pub async fn run_initiator(
     let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
     let device = hex::encode(conn.remote_id().as_bytes());
     let proofs = { let (c, d) = (ctx.clone(), device.clone()); blocking(move || c.proofs(peer_user.as_deref(), &d)).await? };
+    let invite_id = join.as_ref().map(|j| j.invite.clone());
     write_frame(&mut send, &Intro { identity: ctx.own()?, join, proofs }).await?;
     let theirs = match read_frame::<Reply>(&mut recv, INTRO_LIMIT).await? {
         Reply::Welcome(intro) => intro,
         Reply::Refused(reason) => return Err(reason),
+        Reply::Waiting(w) => {
+            // The owner holds the request. Remember what they told us and stop here.
+            if let Some(id) = invite_id {
+                if w.owner.user != ctx.joins.list().iter().find(|j| j.invite_id == id).map(|j| j.owner.user.clone()).unwrap_or_default() {
+                    return Err("The device that answered isn't the invite's owner.".into());
+                }
+                ctx.joins.learn(&id, &w);
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+            let mut applied = Applied::default();
+            applied.joins_changed = true;
+            return Ok(applied);
+        }
     };
     let (peer, identity_changed) = ctx.authorize(&device, &theirs.identity)?;
     let learned = learn_proofs(ctx, &peer, theirs.proofs).await?;
@@ -815,10 +1090,18 @@ pub async fn run_responder(ctx: &SyncCtx, conn: Connection) -> Res<(String, Appl
     let mut joined = None;
     if let (Some(req), Peer::Other(theirs)) = (&intro.join, &peer) {
         let (c, r, t) = (ctx.clone(), req.clone(), theirs.clone());
-        if let Err(e) = blocking(move || c.accept_join(&r, &t)).await {
-            return refuse(send, &conn, e).await;
+        match blocking(move || c.accept_join(&r, &t)).await {
+            Err(e) => return refuse(send, &conn, e).await,
+            Ok(JoinOutcome::Added(ws)) => joined = Some(ws),
+            Ok(JoinOutcome::Waiting(w)) => {
+                let _ = write_frame(&mut send, &Reply::Waiting(w)).await;
+                let _ = send.finish();
+                let _ = tokio::time::timeout(Duration::from_secs(3), conn.closed()).await;
+                let mut applied = Applied::default();
+                applied.approvals_changed = true;
+                return Ok((device, applied));
+            }
         }
-        joined = Some(req.workspace.clone());
     }
     let learned = learn_proofs(ctx, &peer, intro.proofs).await?;
     let (shared, removed) = { let (c, p) = (ctx.clone(), peer.clone()); blocking(move || c.shared_with(&p)).await? };
@@ -937,6 +1220,10 @@ impl SyncService {
         })
     }
 
+    pub fn approvals(&self) -> &Approvals {
+        &self.ctx.approvals
+    }
+
     pub fn joins(&self) -> &Joins {
         &self.ctx.joins
     }
@@ -1036,16 +1323,17 @@ impl SyncService {
         let own = self.ctx.own()?;
         let me = self.ctx.me();
         let mut out: BTreeMap<String, Target> = BTreeMap::new();
-        let mut add = |ids: &IdentityState, device: &str, join: Option<JoinRequest>| {
+        let add_with = |out: &mut BTreeMap<String, Target>, ids: &IdentityState, device: &str, relay: Option<RelayUrl>, join: Option<JoinRequest>| {
             if device == me {
                 return;
             }
-            let Ok(addr) = dial_addr(ids, device, own_relay.clone()) else { return };
+            let Ok(addr) = dial_addr(ids, device, relay) else { return };
             let t = out.entry(device.to_string()).or_insert(Target { user: ids.user.clone(), addr, join: None });
             if t.join.is_none() {
                 t.join = join;
             }
         };
+        let mut add = |ids: &IdentityState, device: &str, join: Option<JoinRequest>| add_with(&mut out, ids, device, own_relay.clone(), join);
         for d in own.certs.keys().filter(|d| own.is_trusted(d)) {
             add(&own, d, None);
         }
@@ -1063,9 +1351,22 @@ impl SyncService {
             }
             Ok(())
         })?;
+        drop(add);
         for j in self.ctx.joins.list() {
+            if j.status == JoinStatus::Declined || j.expires < now() {
+                continue;
+            }
+            let mut any = false;
             for d in j.owner.certs.keys().filter(|d| j.owner.is_trusted(d)) {
-                add(&j.owner, d, Some(j.request()));
+                add_with(&mut out, &j.owner, d, own_relay.clone(), Some(j.request()));
+                any = true;
+            }
+            // Before the owner has answered, the link's device is all we have.
+            if let Some(via) = &j.via {
+                if !any || !j.owner.certs.contains_key(&via.device) {
+                    let relay = via.relay.as_deref().and_then(|r| r.parse::<RelayUrl>().ok()).or_else(|| own_relay.clone());
+                    add_with(&mut out, &j.owner, &via.device, relay, Some(j.request()));
+                }
             }
         }
         Ok(out)
@@ -1089,7 +1390,7 @@ impl SyncService {
                 s.user = t.user.clone();
                 s.last_attempt = Some(now());
             }
-            let joining = t.join.as_ref().map(|j| j.workspace.clone());
+            let joining = t.join.as_ref().map(|j| j.invite.clone());
             // Errors carry whether a connection was ever made: a device that
             // can't be reached is a different story from one that refused us.
             let result: std::result::Result<Applied, (String, bool)> = async {
@@ -1103,8 +1404,8 @@ impl SyncService {
                     .map_err(|e| (e, false))
             }
             .await;
-            if let Some(ws) = &joining {
-                self.finish_join(ws, result.as_ref().err().map(|(e, _)| e.clone()));
+            if let Some(invite) = &joining {
+                self.finish_join(invite, result.as_ref().err().map(|(e, _)| e.clone()));
             }
             match result {
                 Ok(applied) => {
@@ -1117,16 +1418,38 @@ impl SyncService {
     }
 
     /// After trying to redeem an invite: done once membership says we're in.
-    fn finish_join(&self, workspace: &str, error: Option<String>) {
+    fn finish_join(&self, invite: &str, error: Option<String>) {
         let own_user = self.ctx.own().map(|o| o.user).unwrap_or_default();
-        let joined = Workspace::open(&self.ctx.root, workspace)
-            .ok()
-            .and_then(|w| w.members().map(|m| m.role(&own_user).is_some_and(Role::has_access)))
-            .unwrap_or(false);
-        if joined {
-            self.ctx.joins.remove(workspace);
+        let Some(j) = self.ctx.joins.list().into_iter().find(|j| j.invite_id == invite) else { return };
+        let in_ws = |id: &str| {
+            Workspace::open(&self.ctx.root, id)
+                .ok()
+                .and_then(|w| w.members().map(|m| m.role(&own_user).is_some_and(Role::has_access)))
+                .unwrap_or(false)
+        };
+        // A short link doesn't name the workspace: look for the one that redeemed this invite.
+        let joined = if j.workspace.is_empty() {
+            notes_core::list_workspaces(&self.ctx.root)
+                .unwrap_or_default()
+                .iter()
+                .any(|w| {
+                    Workspace::open(&self.ctx.root, &w.id)
+                        .ok()
+                        .and_then(|ws| ws.members().map(|m| m.invite_used_by(invite).is_some_and(|r| r.user == own_user)))
+                        .unwrap_or(false)
+                        && in_ws(&w.id)
+                })
         } else {
-            self.ctx.joins.note(workspace, error.or_else(|| Some("Waiting for the owner to come online".into())));
+            in_ws(&j.workspace)
+        };
+        if joined {
+            self.ctx.joins.remove(invite);
+        } else if error.as_deref().is_some_and(|e| e.contains("declined")) {
+            self.ctx.joins.set_status(invite, JoinStatus::Declined, error);
+        } else if j.status == JoinStatus::Waiting && error.is_none() {
+            // Still waiting: the owner answered, nothing more to say.
+        } else {
+            self.ctx.joins.note(invite, error.or_else(|| Some("Waiting for the owner to come online".into())));
         }
     }
 

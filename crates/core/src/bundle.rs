@@ -36,10 +36,12 @@ const MAGIC: &[u8; 8] = b"NOTESUPD";
 const VERSION_OWN: u8 = 1;
 /// Sealed for another person with their box key (X25519, ephemeral sender key).
 const VERSION_TO: u8 = 2;
+/// Sealed under a passphrase: opens on any device that knows it.
+const VERSION_PASS: u8 = 3;
 const HEADER_LEN: usize = 8 + 1 + 32;
 const HEADER_TO_LEN: usize = HEADER_LEN + 32;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocBundle {
     pub id: String,
@@ -59,6 +61,19 @@ pub struct WorkspaceBundle {
     pub name: String,
     pub docs: Vec<DocBundle>,
     pub events: Vec<Event>,
+}
+
+impl WorkspaceBundle {
+    /// The same bundle with members' private docs left out, for anything
+    /// that came from or goes to another person's device.
+    pub fn without_private(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            docs: self.docs.iter().filter(|d| d.kind != crate::workspace::PRIVATE).cloned().collect(),
+            events: self.events.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -207,14 +222,51 @@ fn open_to(user: &SigningKey, bytes: &[u8]) -> Result<Bundle> {
     Ok(serde_json::from_slice(&plain)?)
 }
 
-/// Open a file sealed for your devices (by one of them) or for you (by someone else).
-pub fn open(user: &SigningKey, bytes: &[u8]) -> Result<Bundle> {
+/// Seal a bundle under a passphrase, for a device that isn't yours and
+/// isn't known yet, or when the recipient's key hasn't reached you. The
+/// header names the sender; the passphrase is the only key.
+pub fn seal_with(sender: &SigningKey, bundle: &Bundle, passphrase: &str) -> Result<Vec<u8>> {
+    let mut header = Vec::with_capacity(HEADER_LEN);
+    header.extend_from_slice(MAGIC);
+    header.push(VERSION_PASS);
+    header.extend_from_slice(&sender.verifying_key().to_bytes());
+    let plain = Zeroizing::new(serde_json::to_vec(bundle)?);
+    // seal_with_passphrase binds nothing to the header; the bundle inside
+    // names its sender, and open_pass checks that against the header.
+    let sealed = crate::identity::seal_with_passphrase(&plain, passphrase)?;
+    let mut out = header;
+    out.extend_from_slice(&sealed);
+    Ok(out)
+}
+
+/// Whether a file needs a passphrase to open.
+pub fn needs_passphrase(bytes: &[u8]) -> bool {
+    bytes.len() > 9 && &bytes[..8] == MAGIC && bytes[8] == VERSION_PASS
+}
+
+fn open_pass(bytes: &[u8], passphrase: &str) -> Result<Bundle> {
+    let header = &bytes[..HEADER_LEN];
+    let plain = crate::identity::open_with_passphrase(&bytes[HEADER_LEN..], passphrase, "update file")?;
+    let bundle: Bundle = serde_json::from_slice(&plain)?;
+    if bundle.identity.user != hex::encode(&header[9..HEADER_LEN]) {
+        return Err(CoreError::Invalid("The update file's identity records don't match its header.".into()));
+    }
+    Ok(bundle)
+}
+
+/// Open a file sealed for your devices (by one of them), for you (by someone
+/// else), or under a passphrase (`passphrase` then required).
+pub fn open(user: &SigningKey, bytes: &[u8], passphrase: Option<&str>) -> Result<Bundle> {
     if bytes.len() < HEADER_LEN + 24 + 16 || &bytes[..8] != MAGIC {
         return Err(CoreError::Invalid("That isn't an update file.".into()));
     }
     match bytes[8] {
         VERSION_OWN => {}
         VERSION_TO => return open_to(user, bytes),
+        VERSION_PASS => {
+            let p = passphrase.map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| CoreError::Invalid("This update file needs its passphrase.".into()))?;
+            return open_pass(bytes, p);
+        }
         _ => return Err(CoreError::Invalid("This update file needs a newer version of the app.".into())),
     }
     let header = &bytes[..HEADER_LEN];
@@ -253,6 +305,10 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub fn read(path: &Path, user: &SigningKey) -> Result<Bundle> {
-    open(user, &std::fs::read(path)?)
+pub fn write_with(path: &Path, sender: &SigningKey, bundle: &Bundle, passphrase: &str) -> Result<()> {
+    write_bytes(path, &seal_with(sender, bundle, passphrase)?)
+}
+
+pub fn read(path: &Path, user: &SigningKey, passphrase: Option<&str>) -> Result<Bundle> {
+    open(user, &std::fs::read(path)?, passphrase)
 }

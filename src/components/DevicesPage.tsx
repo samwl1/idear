@@ -77,10 +77,12 @@ export function DevicesPage({ onImported, onError }: Props) {
         <p className="hint">Used as your assignee name. In a view's Assignee filter, @me means you.</p>
         <div className="setting-row">
           <span>Account ID</span>
-          <code className="fp" title={account.userId}>
+          <code className="fp fp-full" title={account.userId}>
             {fingerprint(account.userId)}
           </code>
+          <CopyId id={account.userId} />
         </div>
+        <p className="hint">All 64 characters are the account; when someone checks you over a call, compare the whole thing.</p>
         {account.mergedIn.length > 0 && (
           <p className="hint">
             {account.mergedIn.length === 1 ? "Another account was merged into this one on " : "Other accounts were merged into this one, last on "}

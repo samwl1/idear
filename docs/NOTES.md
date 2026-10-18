@@ -21,9 +21,14 @@ whiteboards attached to a page, and what a note or whiteboard is itself attached
 phases, tasks, other pages). Pick an existing item or type a name to start a new note already
 attached.
 
-The buttons by a page's title: **pin** it to the sidebar's Pinned section, and **pop out** the
-page into its own window. A popped-out window shows just that page; edits made in any window
-show up in the others.
+The buttons by a page's title: **pin** it to the sidebar's Pinned section, **print or save it
+as a PDF** (notes; the system print dialog does both, with only the note on the page), and
+**pop out** the page into its own window. A popped-out window shows just that page; edits made
+in any window show up in the others.
+
+Pins follow your account: a pin made on one of your devices shows on the others, and never on
+the devices of people you share with. Right-click a pin to keep it **on this device only**
+instead; those show a small mark.
 
 **Links to pages**: type `[[` in a note and pick a page, or use **Insert → Link to a page**. A
 plain click opens it. The link follows the page, not its name, so renaming the page doesn't break
