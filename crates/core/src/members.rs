@@ -362,34 +362,40 @@ impl Members {
         })
     }
 
-    /// The user whose identity certifies `device`, preferring `own` for your own devices.
-    pub fn device_user<'a>(&'a self, device: &str, own: &'a IdentityState) -> Option<&'a IdentityState> {
-        if own.certs.contains_key(device) {
-            return Some(own);
-        }
-        self.identities.values().find(|ids| ids.certs.contains_key(device))
+    /// Every identity that certifies `device`, your own first. Anyone can
+    /// certify any public key, so a device may appear under several users;
+    /// a decision about it must hold for at least one of them, never just
+    /// the first found.
+    fn device_users<'a>(&'a self, device: &'a str, own: &'a IdentityState) -> impl Iterator<Item = &'a IdentityState> + 'a {
+        std::iter::once(own)
+            .chain(self.identities.values().filter(move |ids| ids.user != own.user))
+            .filter(move |ids| ids.certs.contains_key(device))
+    }
+
+    /// The user an event from `device` is attributed to: the first identity
+    /// that certifies it and could act here at `ts`, or failing that any that
+    /// certifies it.
+    pub fn device_user<'a>(&'a self, device: &'a str, ts: i64, own: &'a IdentityState) -> Option<&'a IdentityState> {
+        self.device_users(device, own)
+            .find(|ids| ids.trusted_at(device, ts) && self.could_edit_at(&ids.user, ts))
+            .or_else(|| self.device_users(device, own).next())
     }
 
     /// Whether an event signed by `device` at `ts` counts in this workspace.
     /// `action` is the event's action: a few are the owner's alone.
     pub fn trusts_event(&self, device: &str, ts: i64, action: &str, own: &IdentityState) -> bool {
-        match self.device_user(device, own) {
-            Some(ids) => {
-                ids.trusted_at(device, ts)
-                    && self.could_edit_at(&ids.user, ts)
-                    && (!owner_only(action) || ids.user == self.owner)
-            }
-            None => false,
-        }
+        self.device_users(device, own).any(|ids| {
+            ids.trusted_at(device, ts)
+                && self.could_edit_at(&ids.user, ts)
+                && (!owner_only(action) || ids.user == self.owner)
+        })
     }
 
     /// Whether a device may sync this workspace right now: it belongs to
     /// someone with access, and hasn't been removed from their identity.
     pub fn device_has_access(&self, device: &str, own: &IdentityState) -> bool {
-        match self.device_user(device, own) {
-            Some(ids) => ids.is_trusted(device) && self.role(&ids.user).is_some_and(Role::has_access),
-            None => false,
-        }
+        self.device_users(device, own)
+            .any(|ids| ids.is_trusted(device) && self.role(&ids.user).is_some_and(Role::has_access))
     }
 
     /// Users with access, owner first.

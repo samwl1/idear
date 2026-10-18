@@ -10,6 +10,10 @@ use tauri::State;
 
 use crate::commands::{AppState, CmdResult};
 
+/// The largest update file that gets read into memory. Live sync has its own
+/// per-message limit; files had none.
+const IMPORT_LIMIT: u64 = 512 * 1024 * 1024;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportView {
@@ -56,7 +60,16 @@ pub struct ImportView {
 #[tauri::command]
 pub async fn import_update(state: State<'_, AppState>, path: String) -> CmdResult<ImportView> {
     let user = state.account.lock().map_err(|_| "account lock poisoned")?.user.clone();
-    let b = bundle::read(&PathBuf::from(path), &user).map_err(|e| e.to_string())?;
+    let path = PathBuf::from(path);
+    let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    if size > IMPORT_LIMIT {
+        return Err(format!(
+            "That update file is {} MB; the most this app opens is {} MB.",
+            size / (1024 * 1024),
+            IMPORT_LIMIT / (1024 * 1024)
+        ));
+    }
+    let b = bundle::read(&path, &user).map_err(|e| e.to_string())?;
     let created = b.created;
     let r = state.sync.ctx().import_bundle(b)?;
     state.sync.kick();

@@ -154,11 +154,21 @@ pub async fn join_with_code(state: State<'_, AppState>, code: String, passphrase
             DeviceCert::issue(&user, &d.verifying_key(), &name).map_err(|e| e.to_string())?,
         );
         ensure_box_key(&user, &mut next)?;
-        // Swap keys only once everything else has succeeded.
-        keychain::APP.store(keychain::USER_KEY, &user)?;
+        // Records first, then the key: if the save fails the keychain still
+        // matches the records on disk, and the join can simply be retried. A
+        // failure between the two leaves records for the new account with the
+        // old key, which open() refuses loudly rather than resetting.
+        let previous = std::mem::replace(&mut a.state, next);
+        if let Err(e) = a.save() {
+            a.state = previous;
+            return Err(e);
+        }
+        if let Err(e) = keychain::APP.store(keychain::USER_KEY, &user) {
+            a.state = previous;
+            let _ = a.save();
+            return Err(e);
+        }
         a.user = user;
-        a.state = next;
-        a.save()?;
         Ok(view(a, d))
     })?;
     // Workspaces this device made under its old identity become the new identity's.
@@ -204,6 +214,11 @@ pub async fn revoke_device(state: State<'_, AppState>, device: String) -> CmdRes
         }
         if !a.state.certs.contains_key(&device) {
             return Err("That device isn't linked.".into());
+        }
+        if a.state.revocations.contains_key(&device) {
+            // Already removed; a second record with a later time would make
+            // devices disagree about which of its changes still count.
+            return Ok(view(a, d));
         }
         let r = Revocation::issue(&a.user, &device).map_err(|e| e.to_string())?;
         a.state.revocations.insert(device, r);
