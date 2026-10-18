@@ -45,6 +45,12 @@ impl Hub {
         let path = socket_path(dir);
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).map_err(|e| format!("couldn't listen on {}: {e}", path.display()))?;
+        // Whoever can connect gets Claude's whole session: only this user may.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("couldn't protect {}: {e}", path.display()))?;
+        }
         Ok(Self { listener, path, active: Arc::new(AtomicUsize::new(0)), changed: Arc::new(Notify::new()) })
     }
 
@@ -54,7 +60,18 @@ impl Hub {
         let mut failures = 0;
         loop {
             let stream = match self.listener.accept().await {
-                Ok((s, _)) => s,
+                // Belt and braces with the socket mode: refuse other users outright.
+                Ok((s, _)) => match s.peer_cred() {
+                    Ok(cred) if cred.uid() == unsafe_uid() => s,
+                    Ok(cred) => {
+                        eprintln!("idear mcp: refused a relayed connection from uid {}", cred.uid());
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("idear mcp: couldn't check who connected: {e}");
+                        continue;
+                    }
+                },
                 Err(e) if failures < 20 => {
                     failures += 1;
                     eprintln!("idear mcp: couldn't accept a relayed connection: {e}");
@@ -124,4 +141,10 @@ pub async fn through(dir: &Path) -> Res<()> {
         r = up => r,
         r = down => r,
     }
+}
+
+/// The uid this process runs as.
+fn unsafe_uid() -> u32 {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    unsafe { libc::getuid() }
 }

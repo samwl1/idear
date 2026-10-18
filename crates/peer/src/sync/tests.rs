@@ -82,7 +82,9 @@ fn names(c: &SyncCtx) -> Vec<String> {
     notes_core::list_workspaces(&c.root).unwrap().into_iter().map(|w| w.name).collect()
 }
 
-/// Rename a workspace from this device's copy, the way the app would.
+/// Change the workspace name from this device's copy, logged as an ordinary
+/// edit. Renaming the workspace itself ("workspace.rename") is the owner's
+/// alone; these tests use the name field as a stand-in for any edit.
 fn rename(c: &SyncCtx, id: &str, to: &str) {
     c.open.lock().unwrap().remove(id);
     let mut ws = Workspace::open(&c.root, id).unwrap();
@@ -95,7 +97,7 @@ fn rename(c: &SyncCtx, id: &str, to: &str) {
     m.splice_text(&t, 0, len as isize, to).unwrap();
     m.commit();
     let change = m.get_last_local_change().unwrap().raw_bytes().to_vec();
-    ws.apply_change(&c.device, "manifest", change, "workspace.rename", Some(id)).unwrap();
+    ws.apply_change(&c.device, "manifest", change, "tree.rename", Some(id)).unwrap();
 }
 
 fn name_of(c: &SyncCtx, id: &str) -> String {

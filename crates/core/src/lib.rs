@@ -32,8 +32,10 @@ pub fn list_workspaces(root: &Path) -> Result<Vec<WorkspaceInfo>> {
         if !entry.path().join("events.db").exists() || validate_id(&id).is_err() {
             continue;
         }
-        let ws = Workspace::open(root, &id)?;
-        out.push(WorkspaceInfo { name: ws.name()?, id });
+        // One damaged folder must not hide every other workspace.
+        let Ok(ws) = Workspace::open(root, &id) else { continue };
+        let Ok(name) = ws.name() else { continue };
+        out.push(WorkspaceInfo { name, id });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
@@ -793,6 +795,65 @@ mod sharing {
         let r = send(ro.path(), rn.path(), &nid, &nd);
         assert!(r.problems.is_empty(), "{r:?}");
         assert_eq!(Workspace::open(rn.path(), "w").unwrap().name().unwrap(), "Team (Alex)");
+    }
+
+    #[test]
+    fn a_viewer_certifying_the_owners_device_cannot_hijack_it() {
+        // Anyone can sign a certificate for any public key. Val (a viewer)
+        // certifies Sam's device under her own user; her user id sorts first.
+        let (owner, od, oid) = person(1, 11, "Sam");
+        let (vu, vd, mut vid) = person(0, 13, "Val");
+        let od_id = key_id(&od.verifying_key());
+        vid.certs.insert(od_id.clone(), DeviceCert::issue(&vu, &od.verifying_key(), "stolen").unwrap());
+        let (ro, rv) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+
+        let mut ws = Workspace::create(ro.path(), "w", &manifest().save(), &od).unwrap();
+        ws.ensure_members(&oid).unwrap();
+        ws.update_members(|m| m.set_role(&owner, &vid, Role::Viewer, None)).unwrap();
+        drop(ws);
+        assert!(send(ro.path(), rv.path(), &vid, &vd).created);
+
+        // Sam's later edit must still count on Val's copy, and on anyone's.
+        rename(ro.path(), &od, "Team (Sam)");
+        let r = send(ro.path(), rv.path(), &vid, &vd);
+        assert!(!r.untrusted.contains(&od_id), "{r:?}");
+        assert!(r.problems.is_empty(), "{r:?}");
+        assert_eq!(Workspace::open(rv.path(), "w").unwrap().name().unwrap(), "Team (Sam)");
+
+        let m = Workspace::open(rv.path(), "w").unwrap().members().cloned().unwrap();
+        assert!(m.device_has_access(&od_id, &vid));
+        assert_eq!(m.device_user(&od_id, now_ms(), &vid).map(|i| i.user.clone()), Some(oid.user.clone()));
+        // Val's own device gets no edit rights from the extra certificate.
+        assert!(!m.trusts_event(&key_id(&vd.verifying_key()), now_ms(), "tree.rename", &vid));
+    }
+
+    #[test]
+    fn a_root_layout_change_needs_a_signed_event() {
+        // A viewer puts a whole new tree at the root of the layout. The change
+        // has no dependencies, like the very first one; it must still be refused.
+        let (owner, od, oid) = person(1, 11, "Sam");
+        let (_, vd, vid) = person(3, 13, "Val");
+        let (ro, rv) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut ws = Workspace::create(ro.path(), "w", &manifest().save(), &od).unwrap();
+        ws.ensure_members(&oid).unwrap();
+        ws.update_members(|m| m.set_role(&owner, &vid, Role::Viewer, None)).unwrap();
+        drop(ws);
+        assert!(send(ro.path(), rv.path(), &vid, &vd).created);
+
+        let mut theirs = Workspace::open(rv.path(), "w").unwrap();
+        let mut forged = AutoCommit::new();
+        let t = forged.put_object(ROOT, "name", ObjType::Text).unwrap();
+        forged.splice_text(&t, 0, 0, "Pwned").unwrap();
+        forged.put_object(ROOT, "nodes", ObjType::Map).unwrap();
+        forged.commit();
+        let raw = forged.get_last_local_change().unwrap().raw_bytes().to_vec();
+        // Slip the change into the doc without any event vouching for it.
+        theirs.docs.import_changes("manifest", vec![automerge::Change::from_bytes(raw).unwrap()], |_| true).unwrap();
+        drop(theirs);
+
+        let r = send(rv.path(), ro.path(), &oid, &od);
+        assert!(r.problems.iter().any(|p| p.contains("workspace layout")), "{r:?}");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
     }
 
     #[test]

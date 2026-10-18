@@ -69,6 +69,9 @@ pub struct ImportedEvents {
 pub struct Attested {
     pub hashes: std::collections::HashSet<String>,
     pub workspace_created: bool,
+    /// The creation event listed no heads: a workspace from before creation
+    /// events vouched for the first layout change.
+    pub legacy_create: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -271,6 +274,9 @@ impl EventLog {
             }
             if e.action == "workspace.create" {
                 out.workspace_created = true;
+                if data.get("heads").and_then(|v| v.as_array()).is_none_or(|h| h.is_empty()) {
+                    out.legacy_create = true;
+                }
             }
         }
         Ok(out)

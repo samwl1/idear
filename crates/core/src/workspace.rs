@@ -58,7 +58,7 @@ const ITEM_KINDS: &[&str] = &["note", "whiteboard", "tracker"];
 pub struct Workspace {
     pub id: String,
     dir: PathBuf,
-    docs: DocStore,
+    pub(crate) docs: DocStore,
     index: Index,
     log: EventLog,
     members: Option<Members>,
@@ -171,7 +171,24 @@ impl Workspace {
         if created {
             fs::create_dir_all(&dir)?;
         }
-        let mut ws = Self::open_dir(&wb.id, dir.clone())?;
+        let result = Self::import_into(&dir, wb, members, trusted, device, created);
+        if created && result.is_err() {
+            // Nothing usable was written: leave no folder that would make the
+            // workspace list fail for everything.
+            let _ = fs::remove_dir_all(&dir);
+        }
+        result
+    }
+
+    fn import_into(
+        dir: &Path,
+        wb: &WorkspaceBundle,
+        members: Option<&Members>,
+        trusted: &dyn Fn(&str, i64, &str) -> bool,
+        device: &str,
+        created: bool,
+    ) -> Result<WorkspaceImport> {
+        let mut ws = Self::open_dir(&wb.id, dir.to_path_buf())?;
         let mut report = WorkspaceImport { id: wb.id.clone(), created, ..Default::default() };
         if let Some(m) = members {
             report.members_changed = ws.merge_members(m)?;
@@ -208,10 +225,14 @@ impl Workspace {
                 }
             };
             let is_manifest = d.kind == MANIFEST;
+            // Workspaces made before creation events listed their heads have
+            // no vouched-for first layout change. Only while this copy has no
+            // layout at all is a root change taken on the creation event's
+            // word; once there is one, every change needs a signed event, or
+            // any member could put a whole new tree at the root.
+            let legacy_root = is_manifest && attested.legacy_create && ws.docs.peek(&d.id)?.is_none();
             let accept = |c: &automerge::Change| {
-                attested.hashes.contains(&c.hash().to_string())
-                    // Workspaces made before creation events listed their heads.
-                    || (is_manifest && attested.workspace_created && c.deps().is_empty())
+                attested.hashes.contains(&c.hash().to_string()) || (legacy_root && c.deps().is_empty())
             };
             let imported = match ws.docs.import_changes(&d.id, incoming, accept) {
                 Ok(r) => r,

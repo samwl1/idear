@@ -70,7 +70,13 @@ whenever two of them are online: every 30 seconds, and about 2 seconds after a l
 
 - **Who's allowed:** your own devices (certified by your identity, not removed) sync everything.
   Other people's devices sync only the workspaces you both currently have; a device that shares
-  nothing with you is dropped before learning anything. See [Sharing](SHARING.md).
+  nothing with you is dropped before learning anything. See [Sharing](SHARING.md). Anyone can
+  sign a certificate for any public key, so a device may be certified under several members'
+  identities; a change counts if *any* identity that certifies the device could make it, and a
+  certificate from a viewer never takes rights away from the owner's device.
+- **Opening a session:** the Intro each side sends carries membership records only for
+  workspaces the other device is already known to be in, so a stranger learns nothing about
+  which workspaces you have.
 - **What's sent:** each side says what it has (each doc's heads, each device's latest event),
   and the other sends only what's missing. Imports go through the same verification as update
   files.
