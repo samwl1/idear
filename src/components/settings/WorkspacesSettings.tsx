@@ -6,6 +6,8 @@ import { NameInput, WorkspaceMark } from "../WorkspaceSwitcher";
 import { LookPicker } from "../LookPicker";
 import { WorkspaceSession, type WorkspaceLook } from "../../lib/session";
 import { cachedLook, rememberLook } from "../../lib/looks";
+import { showToast } from "../../lib/toast";
+import { carryPins } from "../../lib/pins";
 
 interface Props {
   workspaces: WorkspaceInfo[];
@@ -47,6 +49,7 @@ export function WorkspacesSettings({ workspaces, currentId, onOpen, onCreate, on
   const [trash, setTrash] = useState<Trashed[]>([]);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [merging, setMerging] = useState<string | null>(null);
   const loadTrash = useCallback(() => api.listTrash().then(setTrash, onError), [onError]);
 
   useEffect(() => {
@@ -73,6 +76,30 @@ export function WorkspacesSettings({ workspaces, currentId, onOpen, onCreate, on
     }
   };
 
+  /**
+   * Everything in `from` goes to the top level of `into`, then `from` goes to
+   * the trash. The copy finishes before anything is removed; a failure
+   * part-way leaves `from` as it was.
+   */
+  const merge = async (from: WorkspaceInfo, into: WorkspaceInfo) => {
+    try {
+      const src = from.id === currentId && session ? session : await WorkspaceSession.open(from.id);
+      const dst = into.id === currentId && session ? session : await WorkspaceSession.open(into.id);
+      dst.setCanEdit(canEditRole(into.role));
+      const sub = await src.exportSubtree(null);
+      const n = Object.keys(sub.nodes).length;
+      const ids = await dst.importSubtree(null, sub, "tree.merge_in");
+      await api.deleteWorkspace(from.id);
+      carryPins(from.id, into.id, ids);
+      setMerging(null);
+      showToast(`Merged ${n} item${n === 1 ? "" : "s"} from ${from.name} into ${into.name}`);
+      onDeleted(from.id);
+      loadTrash();
+    } catch (e) {
+      onError(e);
+    }
+  };
+
   const purge = async (t: Trashed) => {
     try {
       await api.purgeWorkspace(t.id);
@@ -84,9 +111,39 @@ export function WorkspacesSettings({ workspaces, currentId, onOpen, onCreate, on
   };
 
   const inTrash = trash.filter((t) => t.restorable);
+  // Two of your own with the same name: usually the same workspace from before
+  // this device was added to the account. Offer to fold one into the other.
+  const twins = Object.values(
+    workspaces.filter((w) => w.role === "owner").reduce<Record<string, WorkspaceInfo[]>>((acc, w) => {
+      const k = w.name.trim().toLowerCase();
+      (acc[k] ??= []).push(w);
+      return acc;
+    }, {}),
+  ).filter((g) => g.length > 1);
 
   return (
     <div className="prefs">
+      {twins.length > 0 && (
+        <section className="card notice">
+          <h2>Workspaces that may be the same one</h2>
+          {twins.map((g) => (
+            <p key={g[0].id} className="small">
+              You own {g.length} workspaces named “{g[0].name}”. If they're one workspace from before this device joined the account, merge the one
+              with the older copy into the other.
+              {" "}
+              <button
+                className="ghost small"
+                onClick={() => {
+                  setEditing(g[0].id);
+                  setMerging(g[0].id);
+                }}
+              >
+                Merge…
+              </button>
+            </p>
+          ))}
+        </section>
+      )}
       <section className="card">
         <h2>Workspaces on this device</h2>
         <p className="muted small">Click one to open it. Edit its name, color, and icon here without opening it.</p>
@@ -142,12 +199,30 @@ export function WorkspacesSettings({ workspaces, currentId, onOpen, onCreate, on
                 </div>
               )}
               {editing === w.id && confirm !== w.id && (
-                <WorkspaceEditor
-                  workspace={w}
-                  session={w.id === currentId ? session : null}
-                  onChanged={onChanged}
-                  onError={onError}
-                />
+                <>
+                  <WorkspaceEditor
+                    workspace={w}
+                    session={w.id === currentId ? session : null}
+                    onChanged={onChanged}
+                    onError={onError}
+                  />
+                  {w.role === "owner" && (
+                    <div className="ws-merge">
+                      {merging === w.id ? (
+                        <MergePicker
+                          from={w}
+                          targets={workspaces.filter((x) => x.id !== w.id && canEditRole(x.role))}
+                          onPick={(into) => merge(w, into)}
+                          onCancel={() => setMerging(null)}
+                        />
+                      ) : (
+                        <button className="ghost small" onClick={() => setMerging(w.id)}>
+                          Merge into another workspace…
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </li>
           ))}
@@ -280,6 +355,46 @@ function WorkspaceEditor({
       </label>
       )}
       <LookPicker look={look} onLook={(l) => run(s.setLook(l).then(() => rememberLook(workspace.id, s.look())))} />
+    </div>
+  );
+}
+
+/** Choose where a workspace's pages go; the workspace itself goes to the trash after. */
+function MergePicker({ from, targets, onPick, onCancel }: { from: WorkspaceInfo; targets: WorkspaceInfo[]; onPick: (into: WorkspaceInfo) => void; onCancel: () => void }) {
+  const [into, setInto] = useState<string>(targets[0]?.id ?? "");
+  const target = targets.find((t) => t.id === into);
+  return (
+    <div className="ws-confirm" role="group" aria-label={`Merge ${from.name}`}>
+      {targets.length === 0 ? (
+        <p>No other workspace you can edit to merge into.</p>
+      ) : (
+        <>
+          <p>
+            Everything in {from.name} moves to the top level of the workspace you pick, and its saved views come along.
+            {from.shared && " People you shared it with keep their copies of the old one."} Then {from.name} goes to the trash.
+          </p>
+          <label className="ws-field">
+            <span className="small muted">Merge into</span>
+            <select className="field" value={into} onChange={(e) => setInto(e.target.value)}>
+              {targets.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      )}
+      <div className="ws-actions">
+        <button className="ghost" onClick={onCancel} autoFocus>
+          Cancel
+        </button>
+        {target && (
+          <button className="primary" onClick={() => onPick(target)}>
+            Merge into {target.name}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -6845,3 +6845,11 @@ select:disabled {
 .missing-page button {
   margin-top: 0.5rem;
 }
+
+.ws-merge {
+  flex-basis: 100%;
+  padding: 0 0 0.5rem 2.25rem;
+}
+.ws-merge .ws-confirm {
+  margin-top: 0;
+}

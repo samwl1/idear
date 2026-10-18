@@ -10,6 +10,9 @@ const TREE: Record<string, string> = {
   move: "Moved",
   rename: "Renamed folder",
   delete: "Deleted from workspace",
+  move_in: "Moved in from another workspace",
+  move_out: "Moved to another workspace",
+  merge_in: "Merged in from another workspace",
 };
 const NOUN: Record<string, string> = {
   workspace: "workspace",

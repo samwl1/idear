@@ -21,6 +21,26 @@ export interface ManifestNode {
   order: string;
 }
 
+/** A piece of one workspace's tree, with its docs as plain values, on its way to another. */
+export interface Subtree {
+  nodes: Record<string, ManifestNode>;
+  docs: Record<string, ItemBase>;
+  views: ViewDef[];
+}
+
+/** A deep copy with no Automerge proxies left in it; immutable strings stay immutable. */
+export function plainCopy(v: unknown): unknown {
+  if (v instanceof A.ImmutableString) return new A.ImmutableString(v.val);
+  if (v instanceof Uint8Array) return new Uint8Array(v);
+  if (Array.isArray(v)) return v.map(plainCopy);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = plainCopy(x);
+    return out;
+  }
+  return v;
+}
+
 export interface ViewDef {
   name: string;
   icon?: string;
@@ -525,14 +545,14 @@ export class WorkspaceSession {
    * Removes a node and everything under it from the tree. Item docs stay on disk as
    * history. Returns the removed records so `restoreNodes` can undo it.
    */
-  async deleteNode(id: string): Promise<Record<string, ManifestNode>> {
+  async deleteNode(id: string, action = "tree.delete"): Promise<Record<string, ManifestNode>> {
     const doomed = Object.keys(this.manifest.nodes).filter((nid) => this.isWithin(nid, id));
     const removed: Record<string, ManifestNode> = {};
     for (const nid of doomed) {
       const n = this.manifest.nodes[nid];
       removed[nid] = { kind: n.kind, title: n.title ? String(n.title) : undefined, parent: n.parent, order: n.order };
     }
-    await this.changeManifest("tree.delete", id, (d) => {
+    await this.changeManifest(action, id, (d) => {
       doomed.forEach((nid) => delete d.nodes[nid]);
     });
     return removed;
@@ -553,6 +573,97 @@ export class WorkspaceSession {
         d.nodes[id] = n.title !== undefined ? { kind: n.kind, title: n.title, parent, order: n.order } : { kind: n.kind, parent, order: n.order };
       }
     });
+  }
+
+  // ---- moving between workspaces ---------------------------------------------
+
+  /**
+   * A copy of `id` and everything under it, ready to put in another workspace.
+   * With no `id`, the whole tree. Docs are copied as plain values: the other
+   * workspace gets them as fresh docs with one change, which its members can
+   * verify from the move event, rather than a history nobody there vouched for.
+   */
+  async exportSubtree(id: string | null): Promise<Subtree> {
+    const ids = Object.keys(this.manifest.nodes).filter((nid) => (id ? this.isWithin(nid, id) : true));
+    const nodes: Subtree["nodes"] = {};
+    const docs: Subtree["docs"] = {};
+    // Walk parents before children so import can place each under its parent.
+    const depth = (nid: string, seen = new Set<string>()): number => {
+      const p = this.manifest.nodes[nid]?.parent;
+      return p && ids.includes(p) && !seen.has(nid) ? 1 + depth(p, seen.add(nid)) : 0;
+    };
+    for (const nid of ids.sort((a, b) => depth(a) - depth(b))) {
+      const n = this.manifest.nodes[nid];
+      const parent = n.parent && ids.includes(n.parent) ? n.parent : null;
+      nodes[nid] = { kind: n.kind, title: n.title ? String(n.title) : undefined, parent, order: n.order };
+      if (n.kind === "folder") continue;
+      let doc: ItemBase;
+      try {
+        doc = await this.loadItem(nid);
+      } catch {
+        continue; // not here yet; the tree entry moves on its own
+      }
+      docs[nid] = plainCopy(doc) as ItemBase;
+    }
+    return { nodes, docs, views: id ? [] : this.views().map((v) => plainCopy(v.def) as ViewDef) };
+  }
+
+  /**
+   * Puts a subtree from another workspace under `parent` (null: top level).
+   * Ids are kept where they're free, so links between the moved pages keep
+   * working; a clash gets a fresh id and links follow it. Links to anything
+   * that stayed behind are dropped. Returns the moved ids, old to new.
+   */
+  async importSubtree(parent: string | null, sub: Subtree, action = "tree.move_in"): Promise<Record<string, string>> {
+    if (!this.editable) throw new Error(READ_ONLY);
+    const ids: Record<string, string> = {};
+    for (const old of Object.keys(sub.nodes)) ids[old] = this.manifest.nodes[old] ? uuidv7() : old;
+    // Tasks and phases inside moved projects keep their ids, so links to them survive.
+    const inside = new Set(Object.keys(sub.nodes));
+    for (const d of Object.values(sub.docs)) {
+      const t = d as Partial<Tracker>;
+      Object.keys(t.tasks ?? {}).forEach((k) => inside.add(k));
+      Object.keys(t.phases ?? {}).forEach((k) => inside.add(k));
+    }
+    const map = (x: string) => ids[x] ?? x;
+    for (const [old, n] of Object.entries(sub.nodes)) {
+      if (n.kind === "folder" || !sub.docs[old]) continue;
+      const copy = sub.docs[old] as Note | Whiteboard;
+      if (copy.links) copy.links = copy.links.filter((l) => inside.has(l)).map(map);
+      let doc = A.from<ItemBase>(copy);
+      let id = ids[old];
+      try {
+        await this.enqueue(() => api.createDoc(this.id, id, n.kind as ItemKind, A.save(doc), action));
+      } catch (e) {
+        // The doc exists here without a tree entry (deleted earlier): take a fresh id.
+        if (id !== old || !/already exists/.test(String(e))) throw e;
+        id = ids[old] = uuidv7();
+        doc = A.from<ItemBase>(copy);
+        await this.enqueue(() => api.createDoc(this.id, id, n.kind as ItemKind, A.save(doc), action));
+      }
+      this.items.set(id, doc);
+    }
+    const top = Object.keys(sub.nodes).filter((old) => !sub.nodes[old].parent);
+    const first = top[0] ? ids[top[0]] : parent ?? this.id;
+    await this.changeManifest(action, first, (d) => {
+      const sibs = this.siblings(parent);
+      let last = sibs.length ? sibs[sibs.length - 1].order : null;
+      for (const [old, n] of Object.entries(sub.nodes)) {
+        if (n.kind !== "folder" && !sub.docs[old]) continue; // never arrived; nothing to move
+        const p = n.parent ? ids[n.parent] : parent;
+        const order = n.parent ? n.order : (last = generateKeyBetween(last, null));
+        d.nodes[ids[old]] = n.title !== undefined ? { kind: n.kind, title: n.title, parent: p, order } : { kind: n.kind, parent: p, order };
+      }
+      for (const v of sub.views) {
+        if (!d.views) d.views = {};
+        if (Object.values(d.views).some((x) => x.name === v.name)) continue;
+        const def = plainCopy(v) as ViewDef;
+        const orders = Object.values(d.views).map((x) => x.order).sort();
+        def.order = generateKeyBetween(orders.length ? orders[orders.length - 1] : null, null);
+        d.views[uuidv7()] = def;
+      }
+    });
+    return ids;
   }
 
   // ---- views ----------------------------------------------------------------
