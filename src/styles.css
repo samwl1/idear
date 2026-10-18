@@ -4677,6 +4677,14 @@ body[data-resizing] {
   box-shadow: 0 0 0 6px var(--accent-soft);
 }
 
+/* The note body is a page, not a control: a ring around all of it says
+   nothing the caret doesn't, so the strong ring skips it. */
+:root[data-focus="strong"] .body .prose:focus,
+:root[data-focus="strong"] .body .prose:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 /* Keyboard users see where focus is in fields even when clicked into. */
 :root[data-focus="strong"] .field:focus,
 :root[data-focus="strong"] input:focus {
