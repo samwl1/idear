@@ -220,7 +220,7 @@ pub fn open(user: &SigningKey, bytes: &[u8]) -> Result<Bundle> {
     let header = &bytes[..HEADER_LEN];
     if header[9..HEADER_LEN] != user.verifying_key().to_bytes() {
         return Err(CoreError::Invalid(
-            "This update file is from a different identity. Link this device to it first (Devices → Join with a link code).".into(),
+            "This update file was made by another account. Add this device to that account first (Settings → Devices → Add this device to an account).".into(),
         ));
     }
     let nonce = &bytes[HEADER_LEN..HEADER_LEN + 24];

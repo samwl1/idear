@@ -124,9 +124,10 @@ from **Settings → Devices**.
 - **Editors are trusted with the content.** An editor can delete or rewrite anything. The
   activity log keeps who did it, and every earlier version stays in each doc's change history,
   though there's no screen for browsing old versions yet.
-- **A device in shared workspaces can't switch identities.** Joining another identity with a link
-  code would cost it its place in them, so the app refuses. Link the other device to this one
-  instead.
+- **Linking folds accounts together.** Adding a device that already has workspaces to another
+  account folds its old account into the new one: a succession record signed by both keys says
+  "this account is now that one". Its workspaces, memberships, and history read as the new
+  account's, and its other devices are told to link too. Succession can't be undone.
 - **Update files aren't signed as a whole.** Every change inside is verified, but the "From" line
   shows the identity written in the file, which whoever made the file chose.
 - **Views belong to the workspace**, so everyone sees the same saved views and only editors can

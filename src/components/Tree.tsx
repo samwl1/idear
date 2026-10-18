@@ -344,7 +344,9 @@ function Row(p: RowProps) {
       data-selected={p.selected || undefined}
       data-dragging={p.dragging || undefined}
       data-drop={p.drop ?? undefined}
-      style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem`, ["--indent" as string]: `${0.25 + p.depth * 0.875}rem` }}
+      data-missing={p.node.missing || undefined}
+      title={p.node.missing ? "Waiting for this page to arrive from the device it was made on" : undefined}
+      style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem` }}
       draggable={canEdit && !p.renaming}
       onDragStart={p.onDragStart}
       onDragEnd={p.onDragEnd}

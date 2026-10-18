@@ -236,6 +236,51 @@ impl BoxKey {
 
 // ---- state ----------------------------------------------------------------------
 
+/// One account folding into another, signed by both: `from` agrees to be
+/// succeeded, `to` agrees to take over. Everything `from` was (owner of a
+/// workspace, editor in another) is read as `to` from then on, and every
+/// change `from`'s devices ever signed stays valid under `from`'s own
+/// certificates. Linking two devices that each have history makes one of
+/// these; either device can be the one that joins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Succession {
+    pub from: String,
+    pub to: String,
+    pub at: i64,
+    pub from_sig: String,
+    pub to_sig: String,
+}
+
+#[derive(Serialize)]
+struct SuccessionFields<'a> {
+    from: &'a str,
+    to: &'a str,
+    at: i64,
+}
+
+impl Succession {
+    pub fn issue(from: &SigningKey, to: &SigningKey) -> Result<Self> {
+        let (from_id, to_id, at) = (key_id(&from.verifying_key()), key_id(&to.verifying_key()), now_ms());
+        if from_id == to_id {
+            return Err(CoreError::Invalid("an account can't succeed itself".into()));
+        }
+        let fields = SuccessionFields { from: &from_id, to: &to_id, at };
+        Ok(Self {
+            from: from_id.clone(),
+            to: to_id.clone(),
+            at,
+            from_sig: sign(from, "succession", &fields)?,
+            to_sig: sign(to, "succession", &fields)?,
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let f = SuccessionFields { from: &self.from, to: &self.to, at: self.at };
+        self.from != self.to && verify(&self.from, "succession", &f, &self.from_sig) && verify(&self.to, "succession", &f, &self.to_sig)
+    }
+}
+
 /// Everything public about one user: their name and devices.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -251,6 +296,13 @@ pub struct IdentityState {
     /// For receiving update files from other people.
     #[serde(default)]
     pub box_key: Option<BoxKey>,
+    /// Accounts that were folded into this one, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predecessors: Vec<Succession>,
+    /// Accounts this one was folded into, learned from their devices. A device
+    /// still signing as this account should link to one of those.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub successors: Vec<Succession>,
 }
 
 impl IdentityState {
@@ -289,6 +341,30 @@ impl IdentityState {
         if self.box_key.as_ref().is_some_and(|b| b.user != user || !b.is_valid()) {
             self.box_key = None;
         }
+        self.predecessors.retain(|p| p.to == user && p.is_valid());
+        self.predecessors.sort_by_key(|p| p.at);
+        self.predecessors.dedup_by(|a, b| a.from == b.from);
+        self.successors.retain(|p| p.from == user && p.is_valid());
+        self.successors.sort_by_key(|p| p.at);
+        self.successors.dedup_by(|a, b| a.to == b.to);
+    }
+
+    /// Note that another account (with `theirs` records) took this one over.
+    /// Returns whether that was news.
+    pub fn learn_successor(&mut self, theirs: &IdentityState) -> bool {
+        let mut changed = false;
+        for p in &theirs.predecessors {
+            if p.from == self.user && p.is_valid() && !self.successors.iter().any(|s| s.to == p.to) {
+                self.successors.push(p.clone());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The accounts this one stands for: itself and every predecessor.
+    pub fn is_or_succeeds(&self, user: &str) -> bool {
+        self.user == user || self.predecessors.iter().any(|p| p.from == user)
     }
 
     /// The same records with anything not validly signed removed.
@@ -329,6 +405,17 @@ impl IdentityState {
         for (id, a) in &other.addresses {
             if &a.device == id && a.is_valid() && self.addresses.get(id).is_none_or(|cur| a.updated > cur.updated) {
                 self.addresses.insert(id.clone(), a.clone());
+            }
+        }
+        for p in &other.predecessors {
+            if p.to == self.user && p.is_valid() && !self.predecessors.iter().any(|cur| cur.from == p.from) {
+                self.predecessors.push(p.clone());
+            }
+        }
+        self.predecessors.sort_by_key(|p| p.at);
+        for p in &other.successors {
+            if p.from == self.user && p.is_valid() && !self.successors.iter().any(|cur| cur.to == p.to) {
+                self.successors.push(p.clone());
             }
         }
         *self != before

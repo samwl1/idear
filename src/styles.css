@@ -6923,6 +6923,48 @@ select:disabled {
   background-size: 12px 12px;
 }
 
+/* Devices page: account notices and the add-device confirmation --------------- */
+.card.notice {
+  border-color: color-mix(in srgb, var(--col-yellow) 50%, transparent);
+  background: color-mix(in srgb, var(--col-yellow) 8%, transparent);
+}
+
+.card.notice p {
+  margin: 0;
+}
+
+.join-preview p {
+  margin: 0 0 0.6rem;
+}
+
+.join-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* A page whose content hasn't arrived yet: in the list, but nothing to open. */
+.row[data-missing] .row-main {
+  color: var(--ink-2);
+  font-style: italic;
+}
+
+/* A page listed in the tree whose content hasn't synced here yet. */
+.missing-page {
+  max-width: 36rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+  color: var(--ink-2);
+}
+.missing-page h1 {
+  color: var(--ink);
+  margin: 0 0 1rem;
+}
+.missing-page p {
+  margin: 0 0 0.75rem;
+}
+.missing-page button {
+  margin-top: 0.5rem;
 /* Pixel grid ------------------------------------------------------------------
    Controls get whole-pixel paddings and line heights so their 1px edges sit on
    device pixels at 1x. Fractional rem values (0.2rem = 3.2px) smear a hairline

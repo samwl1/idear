@@ -122,10 +122,16 @@ impl MemberRecord {
     }
 
     pub fn is_valid(&self, workspace: &str, owner: &str) -> bool {
+        self.is_valid_any(workspace, std::slice::from_ref(&owner.to_string()))
+    }
+
+    /// Valid when signed by any of `owners`: the original owner or an account
+    /// that succeeded it.
+    pub fn is_valid_any(&self, workspace: &str, owners: &[String]) -> bool {
         self.workspace == workspace
-            && self.user != owner
+            && !owners.iter().any(|o| o == &self.user)
             && self.role != Role::Owner
-            && verify(owner, "member", &self.fields(), &self.sig)
+            && owners.iter().any(|o| verify(o, "member", &self.fields(), &self.sig))
     }
 }
 
@@ -173,9 +179,13 @@ impl InviteRecord {
     }
 
     pub fn is_valid(&self, workspace: &str, owner: &str) -> bool {
+        self.is_valid_any(workspace, std::slice::from_ref(&owner.to_string()))
+    }
+
+    pub fn is_valid_any(&self, workspace: &str, owners: &[String]) -> bool {
         self.workspace == workspace
             && matches!(self.role, Role::Editor | Role::Viewer)
-            && verify(owner, "invite", &self.fields(), &self.sig)
+            && owners.iter().any(|o| verify(o, "invite", &self.fields(), &self.sig))
     }
 }
 
@@ -260,16 +270,60 @@ impl Members {
 
     /// Keep only records signed by the owner and identities that check out.
     pub fn validated(mut self) -> Self {
-        let (ws, owner) = (self.workspace.clone(), self.owner.clone());
-        self.records.retain(|r| r.is_valid(&ws, &owner));
-        self.invites.retain(|id, i| &i.id == id && i.is_valid(&ws, &owner));
+        // Identities first: they say which accounts may sign as the owner.
         self.identities = std::mem::take(&mut self.identities)
             .into_iter()
             .filter(|(u, s)| &s.user == u)
             .map(|(u, s)| (u, s.validated()))
             .collect();
+        let (ws, owners) = (self.workspace.clone(), self.owner_keys());
+        self.records.retain(|r| r.is_valid_any(&ws, &owners));
+        self.invites.retain(|id, i| &i.id == id && i.is_valid_any(&ws, &owners));
         self.sort();
         self
+    }
+
+    // ---- successions ----------------------------------------------------------------
+
+    /// The account `user` is read as today: itself, or whatever account it was
+    /// folded into (following a chain, if it was folded more than once).
+    pub fn canon(&self, user: &str) -> String {
+        let mut cur = user.to_string();
+        for _ in 0..16 {
+            match self.identities.values().find(|i| i.predecessors.iter().any(|p| p.from == cur)) {
+                Some(next) if next.user != cur => cur = next.user.clone(),
+                _ => break,
+            }
+        }
+        cur
+    }
+
+    /// Whether two account ids are the same account once successions are followed.
+    pub fn same_account(&self, a: &str, b: &str) -> bool {
+        a == b || self.canon(a) == self.canon(b)
+    }
+
+    /// The account that owns the workspace today.
+    pub fn current_owner(&self) -> String {
+        self.canon(&self.owner)
+    }
+
+    pub fn is_owner(&self, user: &str) -> bool {
+        self.same_account(user, &self.owner)
+    }
+
+    /// Every account id whose key may sign as the owner: the original owner
+    /// and each account the ownership passed to.
+    pub fn owner_keys(&self) -> Vec<String> {
+        let mut out = vec![self.owner.clone()];
+        for _ in 0..16 {
+            let last = out.last().cloned().expect("non-empty");
+            match self.identities.values().find(|i| i.predecessors.iter().any(|p| p.from == last)) {
+                Some(next) if !out.contains(&next.user) => out.push(next.user.clone()),
+                _ => break,
+            }
+        }
+        out
     }
 
     fn sort(&mut self) {
@@ -287,20 +341,6 @@ impl Members {
             )));
         }
         let before = self.clone();
-        let (ws, owner) = (self.workspace.clone(), self.owner.clone());
-        for r in &other.records {
-            if r.is_valid(&ws, &owner) && !self.records.iter().any(|x| x.sig == r.sig) {
-                self.records.push(r.clone());
-            }
-        }
-        for (id, i) in &other.invites {
-            if &i.id == id
-                && i.is_valid(&ws, &owner)
-                && self.invites.get(id).is_none_or(|cur| (i.issued, i.cancelled) > (cur.issued, cur.cancelled))
-            {
-                self.invites.insert(id.clone(), i.clone());
-            }
-        }
         for (user, ids) in &other.identities {
             if &ids.user != user {
                 continue;
@@ -314,6 +354,20 @@ impl Members {
                 }
             }
         }
+        let (ws, owners) = (self.workspace.clone(), self.owner_keys());
+        for r in &other.records {
+            if r.is_valid_any(&ws, &owners) && !self.records.iter().any(|x| x.sig == r.sig) {
+                self.records.push(r.clone());
+            }
+        }
+        for (id, i) in &other.invites {
+            if &i.id == id
+                && i.is_valid_any(&ws, &owners)
+                && self.invites.get(id).is_none_or(|cur| (i.issued, i.cancelled) > (cur.issued, cur.cancelled))
+            {
+                self.invites.insert(id.clone(), i.clone());
+            }
+        }
         self.sort();
         Ok(*self != before)
     }
@@ -321,7 +375,8 @@ impl Members {
     /// Fold in a user's latest public identity (e.g. your own, with a newly
     /// linked device). Only users who are part of the workspace are kept.
     pub fn learn_identity(&mut self, ids: &IdentityState) -> bool {
-        if self.role(&ids.user).is_none() {
+        let part = self.role(&ids.user).is_some() || ids.predecessors.iter().any(|p| self.role(&p.from).is_some());
+        if !part {
             return false;
         }
         match self.identities.get_mut(&ids.user) {
@@ -337,13 +392,15 @@ impl Members {
         !self.records.is_empty()
     }
 
-    fn history<'a>(&'a self, user: &'a str) -> impl Iterator<Item = &'a MemberRecord> + 'a {
-        self.records.iter().filter(move |r| r.user == user)
+    /// A user's records, including those for accounts folded into theirs.
+    fn history<'a>(&'a self, user: &str) -> impl Iterator<Item = &'a MemberRecord> + 'a {
+        let canon = self.canon(user);
+        self.records.iter().filter(move |r| r.user == canon || self.canon(&r.user) == canon)
     }
 
     /// A user's current role, or None if they were never part of it.
     pub fn role(&self, user: &str) -> Option<Role> {
-        if user == self.owner {
+        if self.is_owner(user) {
             return Some(Role::Owner);
         }
         self.history(user).last().map(|r| r.role)
@@ -353,7 +410,7 @@ impl Members {
     /// otherwise only while they were an editor. Only the end of an editor
     /// period is enforced: before joining they had no copy to change.
     pub fn could_edit_at(&self, user: &str, ts: i64) -> bool {
-        if user == self.owner {
+        if self.is_owner(user) {
             return true;
         }
         let hist: Vec<&MemberRecord> = self.history(user).collect();
@@ -387,7 +444,7 @@ impl Members {
         self.device_users(device, own).any(|ids| {
             ids.trusted_at(device, ts)
                 && self.could_edit_at(&ids.user, ts)
-                && (!owner_only(action) || ids.user == self.owner)
+                && (!owner_only(action) || self.is_owner(&ids.user))
         })
     }
 
@@ -407,22 +464,26 @@ impl Members {
                 .filter(|n| !n.is_empty())
                 .unwrap_or_else(|| fallback.to_string())
         };
+        let owner = self.current_owner();
         let mut out = vec![MemberView {
-            user: self.owner.clone(),
-            name: name(&self.owner, ""),
+            user: owner.clone(),
+            name: name(&owner, ""),
             role: Role::Owner,
             since: 0,
         }];
-        let mut users: Vec<&str> = self.records.iter().map(|r| r.user.as_str()).collect();
-        users.dedup();
+        // One entry per account, under the id it goes by today.
+        let mut users: Vec<String> = self.records.iter().map(|r| self.canon(&r.user)).collect();
         users.sort();
         users.dedup();
         for u in users {
-            let hist: Vec<&MemberRecord> = self.history(u).collect();
+            if u == owner {
+                continue;
+            }
+            let hist: Vec<&MemberRecord> = self.history(&u).collect();
             let last = hist[hist.len() - 1];
             out.push(MemberView {
-                user: u.to_string(),
-                name: name(u, &last.name),
+                user: u.clone(),
+                name: name(&u, &last.name),
                 role: last.role,
                 since: hist[0].issued,
             });
@@ -501,7 +562,7 @@ impl Members {
     // ---- owner actions ------------------------------------------------------------
 
     fn require_owner(&self, key: &SigningKey) -> Result<()> {
-        if key_id(&key.verifying_key()) != self.owner {
+        if !self.owner_keys().contains(&key_id(&key.verifying_key())) {
             return Err(CoreError::Invalid("Only the workspace's owner can change who has access.".into()));
         }
         Ok(())
@@ -516,7 +577,7 @@ impl Members {
         invite: Option<&str>,
     ) -> Result<MemberRecord> {
         self.require_owner(owner)?;
-        if user.user == self.owner {
+        if self.is_owner(&user.user) {
             return Err(CoreError::Invalid("The owner's role can't change.".into()));
         }
         if role == Role::Owner {
@@ -588,7 +649,7 @@ impl Members {
     /// The copy to send to another user: invites only go to the owner's own devices.
     pub fn for_user(&self, user: &str) -> Members {
         let mut out = self.clone();
-        if user != self.owner {
+        if !self.is_owner(user) {
             out.invites.clear();
         }
         out
@@ -611,6 +672,55 @@ mod tests {
         s.name = Some(crate::identity::NameRecord::issue(&u, name).unwrap());
         s.certs.insert(key_id(&d.verifying_key()), DeviceCert::issue(&u, &d.verifying_key(), "laptop").unwrap());
         (u, d, s)
+    }
+
+    #[test]
+    fn successions_carry_roles_and_ownership() {
+        use crate::identity::Succession;
+        let (owner, _od, oid) = person(1, 11, "Sam");
+        let (alex1, _ad1, aid1) = person(2, 12, "Alex");
+        let mut m = Members::new("w", &oid);
+        m.set_role(&owner, &aid1, Role::Editor, None).unwrap();
+
+        // Alex links a second computer the "wrong way round": their old account
+        // folds into the new one. The new account inherits the editor role.
+        let (alex2, ad2, mut aid2) = person(3, 13, "Alex");
+        aid2.predecessors.push(Succession::issue(&alex1, &alex2).unwrap());
+        assert!(m.role(&aid2.user).is_none(), "unknown until the identity is learned");
+        assert!(m.learn_identity(&aid2), "an account succeeding a member is let in");
+        assert_eq!(m.role(&aid2.user), Some(Role::Editor));
+        assert_eq!(m.role(&aid1.user), Some(Role::Editor), "the old id still resolves");
+        assert!(m.could_edit_at(&aid2.user, now_ms()));
+        assert!(m.device_has_access(&key_id(&ad2.verifying_key()), &oid));
+        let people = m.people();
+        assert_eq!(people.len(), 2, "one entry per account: {people:?}");
+        assert_eq!(people[1].user, aid2.user);
+
+        // The owner's own succession: records signed by the new key count, the
+        // new key may act as owner, and the old owner's records stay valid.
+        let (sam2, _sd2, mut sid2) = person(4, 14, "Sam");
+        sid2.predecessors.push(Succession::issue(&owner, &sam2).unwrap());
+        assert!(m.learn_identity(&sid2));
+        assert!(m.is_owner(&sid2.user));
+        assert_eq!(m.current_owner(), sid2.user);
+        assert_eq!(m.role(&sid2.user), Some(Role::Owner));
+        assert_eq!(m.owner_keys(), vec![oid.user.clone(), sid2.user.clone()]);
+        let (_, _, vid) = person(5, 15, "Val");
+        m.set_role(&sam2, &vid, Role::Viewer, None).unwrap();
+        assert_eq!(m.role(&vid.user), Some(Role::Viewer));
+        // A copy loaded fresh re-validates everything the same way.
+        let again: Members = serde_json::from_slice(&serde_json::to_vec(&m).unwrap()).unwrap();
+        let again = again.validated();
+        assert_eq!(again.role(&vid.user), Some(Role::Viewer));
+        assert_eq!(again.role(&aid2.user), Some(Role::Editor));
+        assert_eq!(again.people()[0].user, sid2.user);
+        // A stranger claiming to succeed the owner, without the owner's signature, is ignored.
+        let (mal, _, mut mid) = person(6, 16, "Mal");
+        let forged = Succession { from: oid.user.clone(), to: mid.user.clone(), at: now_ms(), from_sig: "00".repeat(64), to_sig: "00".repeat(64) };
+        mid.predecessors.push(forged);
+        assert!(!m.learn_identity(&mid.clone().validated()));
+        assert!(!m.is_owner(&mid.user));
+        let _ = mal;
     }
 
     #[test]

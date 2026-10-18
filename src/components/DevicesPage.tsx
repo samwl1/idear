@@ -1,5 +1,5 @@
 import { useContext, useEffect, useRef, useState } from "react";
-import { api, type DeviceView, type InviteView, type PeerStatus, type SyncStatus } from "../lib/api";
+import { api, type DeviceView, type InviteView, type JoinPreview, type PeerStatus, type SyncStatus } from "../lib/api";
 import { fingerprint, useAccount } from "../lib/account";
 import { NavContext } from "../lib/nav";
 import { Icon } from "./Icon";
@@ -41,10 +41,22 @@ export function DevicesPage({ onImported, onError }: Props) {
       <header className="devices-head">
         <h1>Devices</h1>
         <p className="muted">
-          Your devices share one identity. Each device signs its own changes, and your identity vouches for the
-          devices.
+          Your account is the set of devices you've added to it. They sync with each other, and anything you share
+          is shared as you, from any of them.
         </p>
       </header>
+
+      {account.mergedInto !== null && (
+        <section className="card notice">
+          <h2>This account was merged into another one</h2>
+          <p>
+            On {dateFmt.format(account.mergedInto)}, one of your devices added itself to another account and took
+            this account's workspaces and sharing with it. This device is still on the old account, so it won't
+            sync with the others until it's added too: create a code on one of them under <b>Add a device</b> and
+            enter it below.
+          </p>
+        </section>
+      )}
 
       <section className="card">
         <h2>You</h2>
@@ -64,15 +76,21 @@ export function DevicesPage({ onImported, onError }: Props) {
         </label>
         <p className="hint">Used as your assignee name. In a view's Assignee filter, @me means you.</p>
         <div className="setting-row">
-          <span>Identity</span>
+          <span>Account ID</span>
           <code className="fp" title={account.userId}>
             {fingerprint(account.userId)}
           </code>
         </div>
+        {account.mergedIn.length > 0 && (
+          <p className="hint">
+            {account.mergedIn.length === 1 ? "Another account was merged into this one on " : "Other accounts were merged into this one, last on "}
+            {dateFmt.format(Math.max(...account.mergedIn))}.
+          </p>
+        )}
       </section>
 
       <section className="card">
-        <h2>Linked devices</h2>
+        <h2>Your devices</h2>
         <ul className="device-list">
           {active.map((d) => (
             <DeviceRow
@@ -103,7 +121,7 @@ export function DevicesPage({ onImported, onError }: Props) {
             </ul>
           </>
         )}
-        <p className="hint">Devices you link or remove reach your other devices on the next sync.</p>
+        <p className="hint">Devices you add or remove reach your other devices on the next sync.</p>
       </section>
 
       <SyncCard status={sync} onStatus={setSync} onError={onError} />
@@ -122,7 +140,9 @@ function syncLine(status: PeerStatus | null, on: boolean): { text: string; state
   if (!on) return { text: "Live sync is off", state: "idle" };
   if (!status) return { text: "Not synced yet", state: "idle" };
   if (status.lastError) {
-    const last = status.lastSync ? ` Last synced ${ago(status.lastSync)}.` : "";
+    const last = status.lastSync ? ` Last synced ${ago(status.lastSync)}.` : " Not synced yet.";
+    // Off or asleep is the normal state of a device that isn't this one.
+    if (status.offline) return { text: `Offline.${last}`, state: "idle" };
     return { text: `${status.lastError}.${last}`, state: "warn" };
   }
   return status.lastSync ? { text: `Synced ${ago(status.lastSync)}`, state: "ok" } : { text: "Not synced yet", state: "idle" };
@@ -267,9 +287,9 @@ function CreateLink({ onError }: { onError: (err: unknown) => void }) {
 
   return (
     <section className="card">
-      <h2>Link another device</h2>
+      <h2>Add a device</h2>
       <p className="muted small">
-        Creates a one-time code that lets another device join your identity. Anyone with the code and passphrase can,
+        Creates a one-time code to enter on the other device. Anyone with the code and passphrase could add a device,
         so treat them like a password.
       </p>
       {!invite || expired ? (
@@ -330,13 +350,26 @@ function JoinWithCode({ onError }: { onError: (err: unknown) => void }) {
   const [code, setCode] = useState("");
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<JoinPreview | null>(null);
   const [joined, setJoined] = useState(false);
+
+  const check = async () => {
+    setBusy(true);
+    try {
+      setPreview(await api.previewJoin(code, pass));
+    } catch (e) {
+      onError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const join = async () => {
     setBusy(true);
     try {
       setAccount(await api.joinWithCode(code, pass));
       setJoined(true);
+      setPreview(null);
       setCode("");
       setPass("");
     } catch (e) {
@@ -346,27 +379,78 @@ function JoinWithCode({ onError }: { onError: (err: unknown) => void }) {
     }
   };
 
+  const other = (p: JoinPreview) => p.accountName || "the other account";
+  const owns = preview?.workspaces.filter((w) => w.kind !== "member") ?? [];
+  const member = preview?.workspaces.filter((w) => w.kind === "member") ?? [];
+  const sharedWith = new Set(preview?.workspaces.flatMap((w) => w.people) ?? []);
+
   return (
     <section className="card">
-      <h2>Join with a link code</h2>
+      <h2>Add this device to an account</h2>
       <p className="muted small">
-        Makes this device one of yours. It takes on your identity from the other device; workspaces already on this
-        device stay here.
+        Enter a code made on one of your other devices. Everything on this device comes along: its workspaces,
+        anything shared with you, and who it's shared with.
       </p>
       {joined ? (
         <p className="report ok">
-          <Icon name="check" /> Linked as {account?.name || "your identity"}.
+          <Icon name="check" /> This device is now part of {account?.name ? `${account.name}'s` : "the"} account.
         </p>
+      ) : preview ? (
+        <div className="join-preview">
+          <p>
+            This device joins <b>{other(preview)}</b>'s account
+            {preview.devices > 0 ? ` (${preview.devices} device${preview.devices === 1 ? "" : "s"} so far)` : ""}.
+            {preview.workspaces.length === 0 ? " It has no workspaces of its own, so nothing else changes." : ""}
+          </p>
+          {owns.length > 0 && (
+            <p>
+              Your workspaces here move to that account:{" "}
+              {owns.map((w, i) => (
+                <span key={w.id}>
+                  {i > 0 ? ", " : ""}
+                  <b>{w.name}</b>
+                  {w.people.length ? ` (shared with ${w.people.join(", ")})` : ""}
+                </span>
+              ))}
+              .
+            </p>
+          )}
+          {member.length > 0 && (
+            <p>
+              You stay in the workspaces others shared with you:{" "}
+              {member.map((w, i) => (
+                <span key={w.id}>
+                  {i > 0 ? ", " : ""}
+                  <b>{w.name}</b>
+                </span>
+              ))}
+              .
+            </p>
+          )}
+          {sharedWith.size > 0 && (
+            <p className="muted small">
+              {[...sharedWith].join(", ")} will see you as one person, under {other(preview)}'s name.
+            </p>
+          )}
+          <div className="join-actions">
+            <button className="primary" disabled={busy} onClick={join}>
+              {busy ? "Adding…" : "Add this device"}
+            </button>
+            <button className="ghost" disabled={busy} onClick={() => setPreview(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
       ) : (
         <form
           className="join"
           onSubmit={(e) => {
             e.preventDefault();
-            join();
+            check();
           }}
         >
           <label className="setting">
-            <span>Link code</span>
+            <span>Code</span>
             <textarea
               className="field code-box"
               rows={3}
@@ -387,7 +471,7 @@ function JoinWithCode({ onError }: { onError: (err: unknown) => void }) {
             />
           </label>
           <button className="primary" type="submit" disabled={busy || !code.trim() || !pass.trim()}>
-            {busy ? "Checking…" : "Join"}
+            {busy ? "Checking…" : "Continue"}
           </button>
         </form>
       )}

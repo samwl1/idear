@@ -14,6 +14,7 @@ import { Board } from "../whiteboard/Board";
 import { TrackerPage } from "../tracker/TrackerPage";
 import type { TrackerDoc } from "../tracker/model";
 import { useCanEdit } from "../lib/access";
+import { showToast } from "../lib/toast";
 
 interface Props {
   session: WorkspaceSession;
@@ -32,6 +33,8 @@ interface Props {
 /** Loads the item doc, then renders its header and body. Keyed by id in the parent. */
 export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: Props) {
   const [doc, setDoc] = useState<ItemBase | null>(null);
+  // The tree lists the page but its content hasn't reached this device.
+  const [missing, setMissing] = useState(false);
   const editor = useRef<Editor | null>(null);
   // The note's editor, for the toolbar in the top bar.
   const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
@@ -49,12 +52,16 @@ export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: 
   const remoteVersion = session.remoteVersion(id);
   useEffect(() => {
     let live = true;
-    session.loadItem(id).then((d) => live && setDoc(d), onError);
+    session.loadItem(id).then(
+      (d) => live && setDoc(d),
+      () => live && setMissing(true),
+    );
     return () => {
       live = false;
     };
   }, [session, id, onError, remoteVersion]);
 
+  if (missing) return <MissingPage session={session} id={id} onError={onError} />;
   if (!doc) return <div className="editor-loading" aria-busy="true" />;
 
   if (kind === "whiteboard") {
@@ -317,5 +324,30 @@ function NoteBody({
         session.changeItem<Note>(id, "edit", (d) => A.updateText(d, ["body"], md)).catch(onError)
       }
     />
+  );
+}
+
+/** A page another device made whose content hasn't synced here yet. */
+function MissingPage({ session, id, onError }: { session: WorkspaceSession; id: string; onError: (err: unknown) => void }) {
+  const title = String(session.node(id)?.title ?? "Untitled");
+  const remove = async () => {
+    try {
+      const removed = await session.deleteNode(id);
+      showToast(`Removed “${title}”`, { action: { label: "Undo", run: () => session.restoreNodes(removed).catch(onError) } });
+    } catch (e) {
+      onError(e);
+    }
+  };
+  return (
+    <article className="missing-page">
+      <h1>{title}</h1>
+      <p>
+        This page was made on another device and its content hasn't reached this one yet. It will open once that device syncs.
+      </p>
+      <p>If it was deleted there before it synced, you can remove it from the sidebar.</p>
+      <button type="button" className="ghost" onClick={remove}>
+        Remove from sidebar
+      </button>
+    </article>
   );
 }

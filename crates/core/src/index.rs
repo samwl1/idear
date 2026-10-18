@@ -21,6 +21,10 @@ pub struct TreeNode {
     pub parent: Option<String>,
     pub sort_key: String,
     pub title: String,
+    /// The page is in the layout but its content hasn't arrived (or was
+    /// refused) on this device. Folders have no content and are never missing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 /// Item types a view can return. Folders only when asked for explicitly.
@@ -649,8 +653,10 @@ impl Index {
     pub fn tree(&self) -> Result<Vec<TreeNode>> {
         let placeholders = TREE_TYPES.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT id, type, parent, sort_key, title FROM entities
-             WHERE type IN ({placeholders}) ORDER BY sort_key, id"
+            "SELECT e.id, e.type, e.parent, e.sort_key, e.title,
+                    (e.type != 'folder' AND d.id IS NULL) AS missing
+             FROM entities e LEFT JOIN docs d ON d.id = e.id
+             WHERE e.type IN ({placeholders}) ORDER BY e.sort_key, e.id"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(TREE_TYPES.iter()), |r| {
@@ -660,6 +666,7 @@ impl Index {
                 parent: r.get(2)?,
                 sort_key: r.get(3)?,
                 title: r.get(4)?,
+                missing: r.get::<_, i64>(5)? != 0,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
