@@ -34,8 +34,12 @@ The toolbar at the top of a note has headings, bold, italic, underline, strike, 
 highlight, lists, checklists, quotes, inline code, and links. Select text to use it; blocks come
 from the Insert button or by typing `/`.
 
-- **Tab** indents a list item under the one above (Shift+Tab lifts it). In a code block it adds
-  two spaces; anywhere else, a tab character.
+- **Tab** indents a list item under the one above (Shift+Tab lifts it); on a list's first item,
+  which has nothing above it, Tab does nothing. In a code block it adds two spaces; anywhere
+  else, a tab character.
+- **Leaving a panel, expand, or code block:** Escape moves the cursor to the line below it
+  (making one if the block is last). Enter on an empty last line inside a panel or expand does
+  the same, as does ↓ at the very end of the block.
 - **Moving blocks:** Alt+↑ and Alt+↓ (Option on a Mac) move the block the cursor is in past its
   neighbour: a paragraph, heading, list, panel, expand, code block, or table. Inserted blocks
   (panels, expands, code, images, contents, child pages) also show a ⋮⋮ grip at their left edge
@@ -44,7 +48,8 @@ from the Insert button or by typing `/`.
   Only http, https, and mailto links leave the app.
 - **Width:** Settings → Appearance → Note width. Narrow, Normal, and Wide cap the line length,
   and **Alignment** puts the note in the middle of the window or against its left edge; **Full**
-  uses the whole window, with a Margins slider for the space on each side. Per device.
+  uses the whole window, with a Margins slider: centered keeps the margin on both sides, left
+  keeps it on the left only and the text runs to the window's edge. Per device.
 - **On this page:** once a note has a heading, its outline sits to the right of the text. The
   section you're reading is marked as you scroll; click a heading to jump to it. The arrow in its
   title folds it to a strip of ticks (one per heading, still clickable); the choice is remembered

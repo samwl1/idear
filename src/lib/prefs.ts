@@ -22,7 +22,11 @@ export interface Prefs {
   width: "narrow" | "normal" | "wide" | "full";
   /** Side margins for full-width notes, in rem. */
   margin: number;
-  /** Where a capped-width note sits in the window. Full width has no choice to make. */
+  /**
+   * Where a note sits in the window. Capped widths: centered or against the
+   * left edge. Full width: "center" keeps `margin` on both sides, "left" only
+   * on the left, so the text runs to the window's right edge.
+   */
   align: "center" | "left";
   motion: "system" | "reduce";
   contrast: "normal" | "more";

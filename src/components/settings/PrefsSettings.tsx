@@ -140,8 +140,14 @@ export function AppearanceSettings() {
             onChange={(width) => setPrefs({ width })}
           />
         </Field>
-        {p.width !== "full" && (
-          <Field label="Alignment" hint="Where the note sits when the window is wider than it.">
+        <Field
+          label="Alignment"
+          hint={
+            p.width === "full"
+              ? "Centered keeps the margin on both sides. Left keeps it on the left only, and the text runs to the right edge."
+              : "Where the note sits when the window is wider than it."
+          }
+        >
             <Segmented
               label="Note alignment"
               value={p.align}
@@ -152,9 +158,8 @@ export function AppearanceSettings() {
               onChange={(align) => setPrefs({ align })}
             />
           </Field>
-        )}
         {p.width === "full" && (
-          <Field label="Margins" hint="Space on each side of a full-width note.">
+          <Field label="Margins" hint={p.align === "left" ? "Space on the left of a full-width note." : "Space on each side of a full-width note."}>
             <span className="range-field">
               <input
                 type="range"

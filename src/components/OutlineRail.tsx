@@ -166,7 +166,7 @@ export function OutlineRail({ editor }: { editor: Editor | null }) {
           disabled={narrow}
           onClick={toggle}
         >
-          <Icon name="list" />
+          <Icon name="chevron" className="outline-chev" />
         </button>
         <ol className="outline-ticks" aria-hidden="true">
           {headings.map((h) => (
@@ -180,10 +180,10 @@ export function OutlineRail({ editor }: { editor: Editor | null }) {
   return (
     <nav className="outline" aria-label="On this page" ref={ref}>
       <p className="outline-title">
-        On this page
         <button className="outline-toggle" title="Hide the outline" aria-label="Hide the outline" aria-expanded={true} onClick={toggle}>
-          <Icon name="chevron" className="chev" />
+          <Icon name="chevron" className="outline-chev" />
         </button>
+        On this page
       </p>
       <ol className="outline-list">
         {headings.map((h) => (
@@ -202,12 +202,16 @@ function sameList(a: Heading[], b: Heading[]) {
   return a.length === b.length && a.every((h, i) => h.id === b[i].id && h.level === b[i].level);
 }
 
-/** The nearest ancestor that scrolls vertically, or the window. */
+/**
+ * The nearest ancestor that can scroll vertically, or the window. Whether it
+ * currently overflows doesn't matter: a note that is short when opened grows
+ * as it's written, and the same box scrolls then.
+ */
 function scrollParent(el: HTMLElement): HTMLElement | Window {
   let node: HTMLElement | null = el.parentElement;
   while (node) {
     const { overflowY } = getComputedStyle(node);
-    if ((overflowY === "auto" || overflowY === "scroll") && node.scrollHeight > node.clientHeight) return node;
+    if (overflowY === "auto" || overflowY === "scroll") return node;
     node = node.parentElement;
   }
   return window;
