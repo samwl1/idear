@@ -238,8 +238,28 @@ function useCountdown(until: number | null) {
   return until ? Math.max(0, until - now) : 0;
 }
 
+const LIFETIMES: { minutes: number; label: string }[] = [
+  { minutes: 15, label: "15 minutes" },
+  { minutes: 60, label: "1 hour" },
+  { minutes: 8 * 60, label: "8 hours" },
+  { minutes: 24 * 60, label: "24 hours" },
+  { minutes: 7 * 24 * 60, label: "7 days" },
+];
+
+/** "3d 4h", "2h 05m", or "4:59" when under an hour. */
+function remaining(ms: number) {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+  return `${m}:${String(s % 60).padStart(2, "0")}`;
+}
+
 function CreateLink({ onError }: { onError: (err: unknown) => void }) {
   const [invite, setInvite] = useState<InviteView | null>(null);
+  const [minutes, setMinutes] = useState(15);
   const [copied, setCopied] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
   const left = useCountdown(invite?.expires ?? null);
@@ -253,17 +273,35 @@ function CreateLink({ onError }: { onError: (err: unknown) => void }) {
         so treat them like a password.
       </p>
       {!invite || expired ? (
-        <button
-          className="primary"
-          onClick={() =>
-            api.createLinkCode().then((i) => {
-              setInvite(i);
-              setCopied(false);
-            }, onError)
-          }
-        >
-          {expired ? "Create a new code" : "Create link code"}
-        </button>
+        <>
+          <label className="setting">
+            <span>Code works for</span>
+            <select className="field" value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
+              {LIFETIMES.map((l) => (
+                <option key={l.minutes} value={l.minutes}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          {minutes > 60 && (
+            <p className="hint">
+              A long window is fine when the other device is somewhere else: the passphrase is what protects the code.
+              Keep the passphrase on this screen until you need it.
+            </p>
+          )}
+          <button
+            className="primary"
+            onClick={() =>
+              api.createLinkCode(minutes).then((i) => {
+                setInvite(i);
+                setCopied(false);
+              }, onError)
+            }
+          >
+            {expired ? "Create a new code" : "Create link code"}
+          </button>
+        </>
       ) : (
         <div className="invite">
           <label className="setting">
@@ -280,9 +318,7 @@ function CreateLink({ onError }: { onError: (err: unknown) => void }) {
             <span>2. Type this passphrase on that device. Don't send it with the code.</span>
             <code className="passphrase">{invite.passphrase}</code>
           </div>
-          <p className="hint">
-            Expires in {Math.floor(left / 60000)}:{String(Math.floor((left % 60000) / 1000)).padStart(2, "0")}
-          </p>
+          <p className="hint">Expires in {remaining(left)}</p>
         </div>
       )}
     </section>

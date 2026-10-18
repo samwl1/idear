@@ -40,7 +40,7 @@ src/                React frontend
   public, signed records (your name, device certificates, revocations).
 - **Link codes** carry a copy of the user key, encrypted with XChaCha20-Poly1305 under a key
   derived from the passphrase with Argon2id. The passphrase (about 80 bits) is shown on screen
-  and never included in the code. Codes expire after 15 minutes. Expiry is enforced by the app
+  and never included in the code. Codes expire after 15 minutes by default; the picker on the Devices page allows up to 7 days, for linking a device you can't reach right away. The window only bounds how long a captured code and passphrase stay useful. Expiry is enforced by the app
   opening the code, so treat a code and its passphrase together like a password.
 
 

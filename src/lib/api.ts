@@ -266,7 +266,7 @@ export const api = {
   accountInfo: () => invoke<AccountView>("account_info"),
   setUserName: (name: string) => invoke<AccountView>("set_user_name", { name }),
   renameDevice: (device: string, name: string) => invoke<AccountView>("rename_device", { device, name }),
-  createLinkCode: () => invoke<InviteView>("create_link_code"),
+  createLinkCode: (minutes: number) => invoke<InviteView>("create_link_code", { minutes }),
   joinWithCode: (code: string, passphrase: string) => invoke<AccountView>("join_with_code", { code, passphrase }),
   revokeDevice: (device: string) => invoke<AccountView>("revoke_device", { device }),
   /** `recipient` is a person's user ID; leave it out for your own devices. */
