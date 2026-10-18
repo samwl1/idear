@@ -6970,6 +6970,8 @@ select:disabled {
 }
 .missing-page button {
   margin-top: 0.5rem;
+}
+
 /* Pixel grid ------------------------------------------------------------------
    Controls get whole-pixel paddings and line heights so their 1px edges sit on
    device pixels at 1x. Fractional rem values (0.2rem = 3.2px) smear a hairline

@@ -45,9 +45,6 @@ export const ZOOMS = [0.85, 0.9, 1, 1.1, 1.25, 1.4, 1.6];
 /** Range of the full-width note margin, in rem. */
 export const MARGIN_MIN = 1;
 export const MARGIN_MAX = 16;
-/** Range of the full-width note margin, in rem. */
-export const MARGIN_MIN = 1;
-export const MARGIN_MAX = 16;
 
 export const DEFAULTS: Prefs = {
   theme: "system",
