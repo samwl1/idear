@@ -25,6 +25,15 @@ The buttons by a page's title: **pin** it to the sidebar's Pinned section, and *
 page into its own window. A popped-out window shows just that page; edits made in any window
 show up in the others.
 
+**Links to pages**: type `[[` in a note and pick a page, or use **Insert → Link to a page**. A
+plain click opens it. The link follows the page, not its name, so renaming the page doesn't break
+it (the link text stays as written). Linked pages show under References on both ends. In
+markdown it's `[Title](page:<id>)`.
+
+**Spell check** underlines misspellings as you type, in notes, tasks, and whiteboards; right-click
+a word for suggestions. Code is never checked. Turn it off, or pick dictionaries on Linux, under
+Settings → Appearance → Writing.
+
 **Search** (Cmd/Ctrl+K) finds pages by title or text, tasks, saved views, and commands such as
 new page, switch workspace, and settings.
 

@@ -7208,3 +7208,17 @@ kbd {
 .ws-merge .ws-confirm {
   margin-top: 0;
 }
+
+/* Inline links to other pages: read as a name, not a URL. */
+.prose a[href^="page:"] {
+  color: var(--ink);
+  text-decoration: none;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 3px;
+  padding: 0 0.2em;
+  cursor: pointer;
+}
+.prose a[href^="page:"]:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}

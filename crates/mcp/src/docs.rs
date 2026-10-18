@@ -66,15 +66,63 @@ pub fn last_change(doc: &mut AutoCommit) -> Res<Vec<u8>> {
         .ok_or_else(|| "nothing changed".to_string())
 }
 
-/// A new note doc, as the app creates one.
-pub fn new_note(title: &str, body: &str) -> Res<Vec<u8>> {
+/// A new note doc, as the app creates one. `pages` are the ids the workspace
+/// has, so inline links to them count as references.
+pub fn new_note(title: &str, body: &str, pages: &[String]) -> Res<Vec<u8>> {
     let mut doc = AutoCommit::new();
     put_text(&mut doc, &ROOT, "title", title)?;
     doc.put_object(&ROOT, "tags", ObjType::List).map_err(err)?;
     put_text(&mut doc, &ROOT, "body", body)?;
     put_text(&mut doc, &ROOT, "summary", "")?;
     doc.put_object(&ROOT, "links", ObjType::List).map_err(err)?;
+    add_page_links(&mut doc, body, pages, None)?;
     Ok(doc.save())
+}
+
+/// Page ids linked inline as `[Title](page:<id>)`.
+pub fn page_links_in(markdown: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (i, _) in markdown.match_indices("](page:") {
+        let rest = &markdown[i + 7..];
+        let Some(end) = rest.find(')') else { continue };
+        let id = &rest[..end];
+        if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && !out.iter().any(|x| x == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
+/// Add the pages `markdown` links to (and that exist, and aren't `self_id`)
+/// to the note's `links`, as the app does when you write one.
+pub fn add_page_links(doc: &mut AutoCommit, markdown: &str, pages: &[String], self_id: Option<&str>) -> Res<()> {
+    let wanted: Vec<String> = page_links_in(markdown).into_iter().filter(|id| pages.contains(id) && Some(id.as_str()) != self_id).collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let list = match doc.get(&ROOT, "links").map_err(err)? {
+        Some((automerge::Value::Object(ObjType::List), id)) => id,
+        _ => doc.put_object(&ROOT, "links", ObjType::List).map_err(err)?,
+    };
+    // Read through the AutoCommit itself: document() would commit midway and
+    // split the caller's change in two.
+    let mut have = Vec::new();
+    for i in 0..doc.length(&list) {
+        if let Some((Value::Scalar(v), _)) = doc.get(&list, i).map_err(err)? {
+            if let Some(s) = v.as_str() {
+                have.push(s.to_string());
+            }
+        } else if let Some((Value::Object(ObjType::Text), id)) = doc.get(&list, i).map_err(err)? {
+            have.push(doc.text(&id).map_err(err)?);
+        }
+    }
+    for id in wanted {
+        if !have.contains(&id) {
+            let n = doc.length(&list);
+            doc.insert(&list, n, id.as_str()).map_err(err)?;
+        }
+    }
+    Ok(())
 }
 
 /// Add a node to the manifest's tree, after its last sibling. Returns the change.
@@ -191,13 +239,6 @@ pub fn key_after(a: Option<&str>) -> String {
 
 // ---- reading --------------------------------------------------------------------------
 
-pub struct Column {
-    pub id: String,
-    pub name: String,
-    pub done: bool,
-    pub order: String,
-}
-
 pub struct Task {
     pub id: String,
     pub prefix: Option<String>,
@@ -212,6 +253,17 @@ pub struct Task {
     pub phase: String,
     pub parent: String,
     pub tags: Vec<String>,
+    /// Put away: counts as done wherever its column was.
+    pub archived: bool,
+}
+
+pub struct Column {
+    pub id: String,
+    pub name: String,
+    pub done: bool,
+    pub order: String,
+    /// "todo", "doing", or "done" when the column says; else derived from `done` and position.
+    pub category: String,
 }
 
 pub struct Tracker {
@@ -232,6 +284,7 @@ impl Tracker {
                 name: s(&c, "name")?,
                 done: get_bool(doc, &c, "done").map_err(err)?.unwrap_or(false),
                 order: s(&c, "order")?,
+                category: s(&c, "category")?,
             });
         }
         columns.sort_by(|a, b| a.order.cmp(&b.order).then(a.id.cmp(&b.id)));
@@ -239,6 +292,13 @@ impl Tracker {
         if columns.len() > 1 && !columns.iter().any(|c| c.done) {
             if let Some(last) = columns.last_mut() {
                 last.done = true;
+            }
+        }
+        // Same rule as the app: a column's own category, else done columns
+        // are done, the first is to do, the rest in progress.
+        for i in 0..columns.len() {
+            if !matches!(columns[i].category.as_str(), "todo" | "doing" | "done") {
+                columns[i].category = if columns[i].done { "done" } else if i == 0 { "todo" } else { "doing" }.to_string();
             }
         }
         let mut phases = Vec::new();
@@ -267,6 +327,7 @@ impl Tracker {
                     phase: s(&task, "phase")?,
                     parent: s(&task, "parent")?,
                     tags: get_string_list(doc, &task, "tags").map_err(err)?,
+                    archived: get_i64(doc, &task, "archived").map_err(err)?.is_some_and(|a| a > 0),
                     id,
                 });
             }
@@ -296,6 +357,17 @@ impl Tracker {
     /// The column a task shows in: its own, or the first if that column is gone.
     pub fn column_of(&self, t: &Task) -> Option<&Column> {
         self.columns.iter().find(|c| c.id == t.column).or(self.columns.first())
+    }
+
+    /// "todo", "doing", or "done": archived tasks are done, the backlog is to do.
+    pub fn status_of(&self, t: &Task) -> &str {
+        if t.archived {
+            return "done";
+        }
+        if t.column == "backlog" {
+            return "todo";
+        }
+        self.column_of(t).map(|c| c.category.as_str()).unwrap_or("todo")
     }
 
     /// A task by id or key (e.g. "LAU-3"), case-insensitively.

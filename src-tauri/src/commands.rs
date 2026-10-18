@@ -66,6 +66,42 @@ pub async fn device_id(state: State<'_, AppState>) -> CmdResult<String> {
     Ok(device_hex(&state.key))
 }
 
+/// Turn the webview's spell checker on or off, with the languages to check
+/// against ("en_US", "de_DE"; empty means the system's). On Linux, WebKitGTK
+/// starts with it off and needs telling; the setting is shared by every
+/// window, so each one applies it when it opens. macOS WebKit checks spelling
+/// on its own, following the system settings, and ignores this.
+#[tauri::command]
+pub async fn set_spell_check(app: tauri::AppHandle, enabled: bool, languages: Vec<String>) -> CmdResult<()> {
+    apply_spell_check(&app, enabled, &languages)
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_spell_check(app: &tauri::AppHandle, enabled: bool, languages: &[String]) -> CmdResult<()> {
+    use tauri::Manager;
+    let languages: Vec<String> = languages.iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    for (_, w) in app.webview_windows() {
+        let languages = languages.clone();
+        w.with_webview(move |platform| {
+            use webkit2gtk::{WebContextExt, WebViewExt};
+            if let Some(ctx) = platform.inner().context() {
+                ctx.set_spell_checking_enabled(enabled);
+                if !languages.is_empty() {
+                    let refs: Vec<&str> = languages.iter().map(String::as_str).collect();
+                    ctx.set_spell_checking_languages(&refs);
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn apply_spell_check(_app: &tauri::AppHandle, _enabled: bool, _languages: &[String]) -> CmdResult<()> {
+    Ok(())
+}
+
 /// A workspace in the switcher, with your access to it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
