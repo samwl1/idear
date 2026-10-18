@@ -6,6 +6,16 @@ Everything lives in the sidebar tree: folders, notes, whiteboards, and projects.
 hold pages. Drag to rearrange; right-click or hover for the tools. Deleting a page or folder is
 immediate, with Undo in the message that follows.
 
+**Move to another workspace** (right-click a page or folder) carries it, everything inside it,
+and its pins to the top level of a workspace you can edit. Links between the moved pages keep
+working; links to pages that stayed behind are dropped. The other workspace's members see it as
+a new page: its history starts there.
+
+To fold a whole workspace into another, open **Settings → Workspaces**, edit the one to fold,
+and choose **Merge into another workspace**. Its pages and saved views move over, then it goes
+to the trash. If you own two workspaces with the same name (usual after adding a device that
+already had workspaces to your account), that page offers the merge up top.
+
 Every page has, under its title, **Tags:** and **References:**. References are the notes and
 whiteboards attached to a page, and what a note or whiteboard is itself attached to (projects,
 phases, tasks, other pages). Pick an existing item or type a name to start a new note already

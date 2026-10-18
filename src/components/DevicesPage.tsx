@@ -364,9 +364,11 @@ function JoinWithCode({ onError }: { onError: (err: unknown) => void }) {
     }
   };
 
+  const [hadWorkspaces, setHadWorkspaces] = useState(false);
   const join = async () => {
     setBusy(true);
     try {
+      setHadWorkspaces((preview?.workspaces.length ?? 0) > 0);
       setAccount(await api.joinWithCode(code, pass));
       setJoined(true);
       setPreview(null);
@@ -394,6 +396,7 @@ function JoinWithCode({ onError }: { onError: (err: unknown) => void }) {
       {joined ? (
         <p className="report ok">
           <Icon name="check" /> This device is now part of {account?.name ? `${account.name}'s` : "the"} account.
+          {hadWorkspaces && " Its workspaces are listed alongside the account's once they sync; if one shows up twice, Settings → Workspaces offers to merge them."}
         </p>
       ) : preview ? (
         <div className="join-preview">

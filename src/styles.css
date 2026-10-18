@@ -7200,3 +7200,11 @@ kbd {
   padding-bottom: 2px;
   height: 24px;
 }
+
+.ws-merge {
+  flex-basis: 100%;
+  padding: 0 0 0.5rem 2.25rem;
+}
+.ws-merge .ws-confirm {
+  margin-top: 0;
+}

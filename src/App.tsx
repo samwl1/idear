@@ -70,11 +70,13 @@ export default function App() {
 
   /** `stay` keeps the current page (e.g. Settings) instead of going home. */
   const openWorkspace = useCallback(
-    async (id: string, stay = false) => {
+    async (id: string, stay = false, item?: string | null) => {
       try {
         const s = await WorkspaceSession.open(id);
         if (!POP) localStorage.setItem(LAST_WORKSPACE, id);
-        if (!stay) setPane(null);
+        const kind = item ? s.node(item)?.kind : undefined;
+        if (kind && kind !== "folder") setPane({ type: "item", id: item!, at: Date.now() });
+        else if (!stay) setPane(null);
         setSession(s);
       } catch (e) {
         onError(e);
@@ -437,6 +439,7 @@ export default function App() {
               selectedId={pane?.type === "item" ? pane.id : null}
               onOpen={(id) => openItem(id)}
               onError={onError}
+              onOpenWorkspace={(id, item) => openWorkspace(id, false, item)}
             />
             <ViewsNav
               workspace={session.id}

@@ -4,8 +4,13 @@ import "../src/assetPath";
 import { A, initAutomerge } from "../src/lib/automerge";
 
 const ws = { id: "ws", name: "Sam's notes", role: "owner", shared: false, ownerName: "" };
+// A second, empty workspace, for moving pages between them.
+const ws2 = { id: "ws2", name: "Archive", role: "owner", shared: false, ownerName: "" };
 const docs = new Map<string, any>(); // docId -> Automerge doc
 const kinds = new Map<string, string>();
+const docs2 = new Map<string, any>();
+const kinds2 = new Map<string, string>();
+const store = (id: string) => (id === "ws2" ? { docs: docs2, kinds: kinds2 } : { docs, kinds });
 const ids = { research: "f-research", relay: "n-relay", sync: "n-sync", board: "w-arch", personal: "f-personal", book: "t-book", reading: "n-reading" };
 
 function seed() {
@@ -24,6 +29,7 @@ function seed() {
     views: { v1: { name: "Due this week", icon: "clock", order: "a0", query: { types: ["task"], tags: [], text: "", updatedWithinDays: 7, sort: "updated", statuses: ["todo", "doing"], assignee: "", keys: [] } } },
   });
   docs.set("manifest", manifest);
+  docs2.set("manifest", A.from<any>({ name: "Archive", nodes: {}, views: {} }));
   const note = (title: string, tags: string[], body: string) => A.from<any>({ title, tags, body, summary: "", links: [] });
   docs.set(ids.relay, note("Relay setup", ["sync", "infra"], "The app uses iroh's public NA East relay by default. For the thesis test bench I want a relay on the Pi so the two laptops keep syncing when the campus network blocks UDP.\n\n## What needs to happen\n\n- [x] Install iroh-relay on the Pi and open 443\n- [ ] Point `Settings → Devices → Live sync` at the new URL on both laptops\n- [ ] Confirm the address record updates in `identity.json` after the next sync\n\n:::panel {type=\"warning\"}\nChanging the relay changes this device's address. Other devices learn it at the next sync, so switch one device at a time.\n:::\n\n## Open question\n\nDoes mDNS alone cover the lab network? If both machines are on the same subnet the relay is only a fallback.\n"));
   docs.set(ids.sync, note("Sync protocol", ["sync"], "Each device runs an iroh endpoint whose identity is its device key.\n\nDevices sync whenever two of them are online: every 30 seconds, and about 2 seconds after a local change.\n\n## Endpoints\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n### Endpoints details\n\nMore on this below.\n\n## Discovery\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n## Handshake\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n### Handshake details\n\nMore on this below.\n\n## Document exchange\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n## Conflict handling\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n### Conflict handling details\n\nMore on this below.\n\n## Relay fallback\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n## Failure modes\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n### Failure modes details\n\nMore on this below.\n\n## Open questions\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\nLorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.\n\n"));
@@ -64,9 +70,10 @@ function seed() {
   for (const [k, v] of Object.entries(ids)) kinds.set(v, k.startsWith("f-") ? "folder" : v.startsWith("n-") ? "note" : v.startsWith("w-") ? "whiteboard" : "tracker");
 }
 
-function tree() {
+function tree(wsId = "ws") {
+  const { docs } = store(wsId);
   const m: any = docs.get("manifest");
-  return Object.entries(m.nodes).map(([id, n]: [string, any]) => ({ id, kind: n.kind, parent: n.parent ?? null, sortKey: n.order, title: n.kind === "folder" ? n.title : String(docs.get(id)?.title ?? "") }));
+  return Object.entries(m.nodes).map(([id, n]: [string, any]) => ({ id, kind: n.kind, parent: n.parent ?? null, sortKey: n.order, title: n.kind === "folder" ? n.title : String(docs.get(id)?.title ?? ""), missing: n.kind !== "folder" && !docs.has(id) }));
 }
 
 function rows(q: any) {
@@ -98,11 +105,12 @@ const me = { userId: "u-sam", name: "Sam", thisDevice: "dev-1", devices: [{ id: 
 async function invoke(cmd: string, args: any = {}): Promise<any> {
   switch (cmd) {
     case "account_info": return me;
-    case "list_workspaces": return [ws];
-    case "load_doc": { const d = docs.get(args.docId); return A.save(d).buffer; }
-    case "create_doc": { docs.set(args.docId, A.load(new Uint8Array(args.bytes))); kinds.set(args.docId, args.kind); return null; }
-    case "apply_change": { const [next] = A.applyChanges(docs.get(args.docId), [new Uint8Array(args.change)]); docs.set(args.docId, next); return null; }
-    case "get_tree": return tree();
+    case "list_workspaces": return [ws, ws2];
+    case "load_doc": { const d = store(args.workspaceId).docs.get(args.docId); if (!d) throw new Error(`doc ${args.docId} not found`); return A.save(d).buffer; }
+    case "create_doc": { const st = store(args.workspaceId); if (st.docs.has(args.docId)) throw new Error(`doc ${args.docId} already exists`); st.docs.set(args.docId, A.load(new Uint8Array(args.bytes))); st.kinds.set(args.docId, args.kind); return null; }
+    case "apply_change": { const st = store(args.workspaceId); const [next] = A.applyChanges(st.docs.get(args.docId), [new Uint8Array(args.change)]); st.docs.set(args.docId, next); return null; }
+    case "get_tree": return tree(args.workspaceId);
+    case "delete_workspace": return null;
     case "run_view": return rows(args.query);
     case "links_of": return { outgoing: args.id === ids.relay ? [{ id: ids.book, kind: "tracker", title: "idear 1.1", tracker: null, trackerTitle: null, key: null }] : [], incoming: [] };
     case "notes_hub": return [];

@@ -84,6 +84,23 @@ export function movePin(workspace: string, key: string, before: string | null) {
   write(pinsKey(workspace), rest);
 }
 
+/**
+ * Pages moved to another workspace take their pins along. `ids` maps each
+ * moved id (pages and tasks, with their projects) to its id over there.
+ */
+export function carryPins(from: string, to: string, ids: Record<string, string>) {
+  const src = read<Pin[]>(pinsKey(from), EMPTY);
+  const moving = src.filter((p) => ("id" in p && ids[p.id] !== undefined) || (p.kind === "task" && ids[p.project] !== undefined));
+  if (!moving.length) return;
+  const dst = read<Pin[]>(pinsKey(to), EMPTY);
+  const carried = moving.map((p) => {
+    if (p.kind === "task") return { ...p, id: ids[p.id] ?? p.id, project: ids[p.project] ?? p.project };
+    return "id" in p ? { ...p, id: ids[p.id] ?? p.id } : p;
+  });
+  write(pinsKey(from), src.filter((p) => !moving.includes(p)));
+  write(pinsKey(to), [...dst, ...carried.filter((p) => !isPinned(dst, p))]);
+}
+
 /** Whether a collapsible rail section is open. */
 export function useSectionOpen(id: string): [boolean, (open: boolean) => void] {
   const open = useSyncExternalStore(subscribe, () => read<boolean>(`section:${id}`, true));

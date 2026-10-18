@@ -1,3 +1,4 @@
+import { useEffect, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import type { TreeNode } from "../lib/api";
 import { ancestors, useTree } from "../lib/useTree";
@@ -9,12 +10,17 @@ import { isPinned, usePins } from "../lib/pins";
 import { PinButton } from "./PinnedNav";
 import { RailSection } from "./RailSection";
 import { showToast } from "../lib/toast";
+import { useContextMenu, type MenuItem } from "./ContextMenu";
+import { MoveDialog } from "./MoveDialog";
+import type { WorkspaceInfo } from "../lib/api";
 
 interface Props {
   session: WorkspaceSession;
   selectedId: string | null;
   onOpen: (id: string) => void;
   onError: (err: unknown) => void;
+  /** After a move to another workspace: open that workspace, optionally at the moved page. */
+  onOpenWorkspace?: (id: string, item?: string | null) => void;
 }
 
 type DropPos = "before" | "after" | "inside";
@@ -26,8 +32,10 @@ const KIND_ICON: Record<Exclude<TreeNode["kind"], "folder">, IconName> = {
   tracker: "project",
 };
 
-export function Tree({ session, selectedId, onOpen, onError }: Props) {
+export function Tree({ session, selectedId, onOpen, onError, onOpenWorkspace }: Props) {
   const canEdit = useCanEdit();
+  const menu = useContextMenu();
+  const [moving, setMoving] = useState<TreeNode | null>(null);
   const tree = useTree(session, onError);
   const { nodes, byId, children } = tree;
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -143,6 +151,30 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
     }
   };
 
+  /** Everything under a node, for the move dialog's count. */
+  const countInside = (id: string): number => (children.get(id) ?? []).reduce((n, c) => n + 1 + countInside(c.id), 0);
+
+  const rowMenu = (n: TreeNode): MenuItem[] => {
+    const isFolder = n.kind === "folder";
+    if (!canEdit) return [];
+    return [
+      { label: "New page inside", onSelect: () => setAddingTo(n.id) },
+      ...(isFolder
+        ? [
+            { label: "New subfolder", onSelect: () => newFolder(n.id) },
+            { label: "Rename", onSelect: () => setRenaming(n.id) },
+          ]
+        : []),
+      { label: "Move to another workspace…", onSelect: () => setMoving(n), separator: true },
+      { label: isFolder || hasKids(n.id) ? "Delete with everything inside" : "Delete", onSelect: () => deleteNode(n), danger: true, separator: true },
+    ];
+  };
+
+  const onMoved = (n: TreeNode, target: WorkspaceInfo, firstId: string | null) => {
+    const label = n.title || (n.kind === "folder" ? "Untitled folder" : "Untitled");
+    showToast(`Moved “${label}” to ${target.name}`, onOpenWorkspace ? { action: { label: "Open", run: () => onOpenWorkspace(target.id, firstId) } } : {});
+  };
+
   // ---- drag and drop ----------------------------------------------------------
 
   /** Where a drop on `target` at `pos` would put the dragged node, or null if not allowed. */
@@ -247,6 +279,7 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
           onAdd={() => setAddingTo(n.id)}
           onNewFolder={() => newFolder(n.id)}
           onDelete={() => deleteNode(n)}
+          onContextMenu={(e) => menu.open(e, rowMenu(n))}
         />
         {(n.kind === "folder" || hasKids(n.id)) && expanded.has(n.id) && (
           <ul role="group">{render(n.id, depth + 1)}</ul>
@@ -292,6 +325,18 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
         onDrop={onRootDrop}
       />
 
+      {menu.menu}
+      {moving && (
+        <MoveDialog
+          session={session}
+          id={moving.id}
+          label={moving.title || (moving.kind === "folder" ? "Untitled folder" : "Untitled")}
+          inside={countInside(moving.id)}
+          onMoved={(target, firstId) => onMoved(moving, target, firstId)}
+          onError={onError}
+          onClose={() => setMoving(null)}
+        />
+      )}
       {addingTo !== undefined && (
         <AddNodeDialog
           folderName={addingTo ? byId.get(addingTo)?.title || "folder" : null}
@@ -329,6 +374,7 @@ interface RowProps {
   onAdd: () => void;
   onNewFolder: () => void;
   onDelete: () => void;
+  onContextMenu: (e: ReactMouseEvent) => void;
 }
 
 function Row(p: RowProps) {
@@ -348,6 +394,7 @@ function Row(p: RowProps) {
       title={p.node.missing ? "Waiting for this page to arrive from the device it was made on" : undefined}
       style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem` }}
       draggable={canEdit && !p.renaming}
+      onContextMenu={p.onContextMenu}
       onDragStart={p.onDragStart}
       onDragEnd={p.onDragEnd}
       onDragOver={p.onDragOver}
