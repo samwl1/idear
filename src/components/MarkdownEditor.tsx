@@ -185,6 +185,7 @@ export function MarkdownEditor({
 }: Props) {
   const save = useDebounced(onChange, delay);
   const canEdit = useCanEdit();
+  const prefs = usePrefs();
   // Built once per page: the editor is created once, and rebuilding this
   // list every render would only throw it away. The editing-only extensions
   // are always present; they can't fire while the editor isn't editable.
