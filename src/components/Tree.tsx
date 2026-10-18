@@ -1,4 +1,4 @@
-import { useEffect, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import type { TreeNode } from "../lib/api";
 import { ancestors, useTree } from "../lib/useTree";
 import type { DropRef, ItemKind, WorkspaceSession } from "../lib/session";
@@ -36,6 +36,38 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
   const [addingTo, setAddingTo] = useState<string | null | undefined>(undefined);
   const [dragId, setDragId] = useState<string | null>(null);
   const [drop, setDrop] = useState<DropTarget>(null);
+  // When a drag last showed signs of life. The engine doesn't always deliver
+  // dragend (a drag cancelled with Escape, or let go outside the window), and
+  // without it the row would stay dimmed; anything that ends a drag clears it.
+  const lastDragOver = useRef(0);
+  useEffect(() => {
+    if (!dragId) return;
+    const end = () => {
+      setDragId(null);
+      setDrop(null);
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && end();
+    // dragover keeps firing anywhere in the window while a drag is live.
+    const alive = () => (lastDragOver.current = Date.now());
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastDragOver.current > 3000) end();
+    }, 500);
+    window.addEventListener("dragover", alive);
+    window.addEventListener("dragend", end);
+    window.addEventListener("drop", end);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("blur", end);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("dragover", alive);
+      window.removeEventListener("dragend", end);
+      window.removeEventListener("drop", end);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("blur", end);
+      window.removeEventListener("keydown", key);
+    };
+  }, [dragId]);
 
   // Show the open page, even when it's nested inside collapsed pages or folders.
   useEffect(() => {
@@ -125,6 +157,7 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
 
   const onRowDragOver = (e: DragEvent, n: TreeNode) => {
     if (!dragId) return;
+    lastDragOver.current = Date.now();
     const rect = e.currentTarget.getBoundingClientRect();
     const y = (e.clientY - rect.top) / rect.height;
     // Anything can hold children: the middle of a row drops inside it. An open
@@ -156,6 +189,7 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
 
   const onRootDragOver = (e: DragEvent) => {
     if (!dragId) return;
+    lastDragOver.current = Date.now();
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     if (!drop || !("root" in drop)) setDrop({ root: true });
@@ -197,6 +231,7 @@ export function Tree({ session, selectedId, onOpen, onError }: Props) {
           onDragStart={(e) => {
             e.dataTransfer.effectAllowed = "move";
             e.dataTransfer.setData("text/plain", n.id);
+            lastDragOver.current = Date.now();
             setDragId(n.id);
           }}
           onDragEnd={endDrag}
@@ -309,7 +344,7 @@ function Row(p: RowProps) {
       data-selected={p.selected || undefined}
       data-dragging={p.dragging || undefined}
       data-drop={p.drop ?? undefined}
-      style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem` }}
+      style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem`, ["--indent" as string]: `${0.25 + p.depth * 0.875}rem` }}
       draggable={canEdit && !p.renaming}
       onDragStart={p.onDragStart}
       onDragEnd={p.onDragEnd}
