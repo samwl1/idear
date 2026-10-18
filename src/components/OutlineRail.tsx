@@ -19,6 +19,9 @@ interface Heading {
 const MIN_HEADINGS = 1;
 /** Below this window width the rail folds to its strip on its own. */
 const NARROW = "(max-width: 1100px)";
+const MIN_HEADINGS = 1;
+/** Below this window width the rail folds to its strip on its own. */
+const NARROW = "(max-width: 1100px)";
 /** The heading at or above this many pixels below the top of the scroll box is the current one. */
 const READ_LINE = 96;
 
@@ -33,6 +36,13 @@ export function OutlineRail({ editor }: { editor: Editor | null }) {
     }
   });
   const ref = useRef<HTMLElement>(null);
+  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW);
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
   const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
   useEffect(() => {
     const mq = window.matchMedia(NARROW);
@@ -154,7 +164,9 @@ export function OutlineRail({ editor }: { editor: Editor | null }) {
   };
 
   if (collapsed || narrow) {
+  if (collapsed || narrow) {
     // A slim strip: one tick per heading, the current one marked. Click to open.
+    // A narrow window folds it whatever the setting; the list needs the room.
     // A narrow window folds it whatever the setting; the list needs the room.
     return (
       <nav className="outline outline-collapsed" aria-label="On this page" ref={ref}>
