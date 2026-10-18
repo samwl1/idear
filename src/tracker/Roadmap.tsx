@@ -48,8 +48,14 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
         return phase === NO_PHASE ? !p || !phaseIds.has(p) : p === phase;
       });
 
+  // Whatever ends the current drag, so a view that unmounts mid-drag (or a
+  // pointer the browser cancels) leaves no listeners behind.
+  const cancelDrag = useRef<(() => void) | null>(null);
+  useEffect(() => () => cancelDrag.current?.(), []);
+
   const startDrag = (e: React.PointerEvent, id: string) => {
     if (!canEdit || e.button !== 0 || (e.target as HTMLElement).closest("[data-no-drag]")) return;
+    cancelDrag.current?.();
     // Stops the press from starting a text selection that would follow the drag.
     e.preventDefault();
     const startX = e.clientX;
@@ -76,7 +82,9 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
     const finish = (apply: boolean) => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", esc);
+      cancelDrag.current = null;
       const t = targetRef.current;
       targetRef.current = null;
       setDrag(null);
@@ -87,10 +95,13 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
       if (apply && t !== null && t !== (view.tasks.get(id)?.phase ?? "")) run(ops.setPhase(id, t));
     };
     const up = () => finish(true);
+    const cancel = () => finish(false);
     const esc = (ev: KeyboardEvent) => ev.key === "Escape" && finish(false);
+    cancelDrag.current = cancel;
 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
     window.addEventListener("keydown", esc);
   };
 

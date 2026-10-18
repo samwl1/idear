@@ -20,8 +20,10 @@ export function Breadcrumbs({
   const { openItem } = useContext(NavContext);
   const path = ancestors(tree, id);
   const title = tree.byId.get(id)?.title || "Untitled";
+  // The whole path as a tooltip, for when the bar is too narrow to show it.
+  const full = [...path.map((n) => n.title || (n.kind === "folder" ? "Untitled folder" : "Untitled")), ...(omitCurrent ? [] : [title])].join(" / ");
   return (
-    <nav className="crumbs" aria-label="Location">
+    <nav className="crumbs" aria-label="Location" title={full}>
       {path.map((n, i) => (
         <span key={n.id} className="crumb">
           {n.kind === "folder" ? (
