@@ -88,6 +88,12 @@ export function Grip({ editor }: { editor: ReactNodeViewProps["editor"] }) {
 
 function CodeBlockView({ node, updateAttributes, editor }: ReactNodeViewProps) {
   const [copied, setCopied] = useState(false);
+  // "Copied" resets after a moment; not after the block is gone.
+  useEffect(() => {
+    if (!copied) return;
+    const t = setTimeout(() => setCopied(false), 1200);
+    return () => clearTimeout(t);
+  }, [copied]);
   const language = (node.attrs.language as string | null) ?? "";
   const known = LANGUAGES.some((l) => l.value === language);
   return (
@@ -116,10 +122,7 @@ function CodeBlockView({ node, updateAttributes, editor }: ReactNodeViewProps) {
           type="button"
           className="code-copy"
           onClick={() =>
-            copy(node.textContent, null).then((ok) => {
-              setCopied(ok);
-              setTimeout(() => setCopied(false), 1200);
-            })
+            copy(node.textContent, null).then(setCopied)
           }
         >
           {copied ? "Copied" : "Copy"}
@@ -136,6 +139,11 @@ export const CodeBlock = CodeBlockLowlight.extend({
   draggable: true,
   addNodeView() {
     return ReactNodeViewRenderer(CodeBlockView);
+  },
+  addKeyboardShortcuts() {
+    // Enter on a blank last line and ArrowDown at the end come from the base
+    // extension; Escape leaves from anywhere, like panels and expands.
+    return { ...this.parent?.(), Escape: exitBlock(this.name) };
   },
 }).configure({ lowlight, defaultLanguage: null });
 
@@ -305,6 +313,50 @@ export const ImageInput = Extension.create<{ page: PageContext | null }>({
 });
 
 /** Enter on an empty last line inside a panel or expand steps out below it. */
+/**
+ * Leave the nearest enclosing `name` block: the cursor lands on the line just
+ * below it, a new empty one when the block is the last thing in the note (or
+ * in whatever holds it). `onlyAtEnd` limits it to when the cursor is already
+ * at the block's very end, for ArrowDown; Escape works from anywhere inside.
+ */
+function exitBlock(name: string, onlyAtEnd = false) {
+  return ({ editor }: { editor: Editor }) => {
+    const { $from, empty } = editor.state.selection;
+    if (!empty) return false;
+    let depth = -1;
+    for (let d = $from.depth; d >= 1; d--) {
+      if ($from.node(d).type.name === name) {
+        depth = d;
+        break;
+      }
+    }
+    if (depth < 0) return false;
+    if (onlyAtEnd) {
+      // At the end of the current line, and that line is the last one at
+      // every level between it and the block.
+      if ($from.parentOffset !== $from.parent.content.size) return false;
+      for (let d = $from.depth; d > depth; d--) {
+        if ($from.index(d - 1) !== $from.node(d - 1).childCount - 1) return false;
+      }
+    }
+    return editor
+      .chain()
+      .command(({ tr }) => {
+        const after = $from.after(depth);
+        const next = tr.doc.nodeAt(after);
+        if (next && next.type.name === "paragraph") {
+          tr.setSelection(TextSelection.create(tr.doc, after + 1));
+        } else {
+          tr.insert(after, editor.schema.nodes.paragraph.create());
+          tr.setSelection(TextSelection.create(tr.doc, after + 1));
+        }
+        tr.scrollIntoView();
+        return true;
+      })
+      .run();
+  };
+}
+
 function exitOnEmptyEnter(name: string) {
   return ({ editor }: { editor: Editor }) => {
     const { $from, empty } = editor.state.selection;
@@ -391,7 +443,11 @@ export const Panel = Node.create({
     return ReactNodeViewRenderer(PanelView);
   },
   addKeyboardShortcuts() {
-    return { Enter: exitOnEmptyEnter(this.name) };
+    return {
+      Enter: exitOnEmptyEnter(this.name),
+      Escape: exitBlock(this.name),
+      ArrowDown: exitBlock(this.name, true),
+    };
   },
   ...createBlockMarkdownSpec({
     nodeName: "panel",
@@ -460,7 +516,11 @@ export const Expand = Node.create({
     return ReactNodeViewRenderer(ExpandView);
   },
   addKeyboardShortcuts() {
-    return { Enter: exitOnEmptyEnter(this.name) };
+    return {
+      Enter: exitOnEmptyEnter(this.name),
+      Escape: exitBlock(this.name),
+      ArrowDown: exitBlock(this.name, true),
+    };
   },
   ...createBlockMarkdownSpec({
     nodeName: "expand",

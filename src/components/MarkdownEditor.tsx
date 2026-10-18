@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NodeSelection } from "@tiptap/pm/state";
 import { Placeholder } from "@tiptap/extensions";
 import { Extension } from "@tiptap/core";
@@ -46,20 +46,28 @@ const TabKey = Extension.create({
     return {
       Tab: ({ editor }) => {
         if (editor.isActive("codeBlock")) return editor.commands.insertContent("  ");
-        // A list item nests under the one above it; the first item of a list
-        // has nothing to nest under, so it gets a tab in its text instead.
-        if (editor.isActive("taskItem") && editor.commands.sinkListItem("taskItem")) return true;
-        if (editor.isActive("listItem") && editor.commands.sinkListItem("listItem")) return true;
+        // A list item nests under the one above it. The first item of a list
+        // has nothing to nest under (the document model can't hold a deeper
+        // level without a parent item), so Tab does nothing there; a tab
+        // character never lands in a list, where it would move the text and
+        // leave the bullet behind.
+        for (const item of ["taskItem", "listItem"] as const) {
+          if (!editor.isActive(item)) continue;
+          return editor.commands.sinkListItem(item) || true;
+        }
         return editor.commands.insertContent("\t");
       },
       "Shift-Tab": ({ editor }) => {
         // Take back a tab or two spaces before the cursor; otherwise lift the list item.
         const { from } = editor.state.selection;
         const before = editor.state.doc.textBetween(Math.max(0, from - 2), from, "\n");
-        if (before.endsWith("\t")) return editor.commands.deleteRange({ from: from - 1, to: from });
         if (before === "  " && editor.isActive("codeBlock")) return editor.commands.deleteRange({ from: from - 2, to: from });
-        if (editor.isActive("taskItem") && editor.commands.liftListItem("taskItem")) return true;
-        if (editor.isActive("listItem") && editor.commands.liftListItem("listItem")) return true;
+        for (const item of ["taskItem", "listItem"] as const) {
+          if (!editor.isActive(item)) continue;
+          if (editor.commands.liftListItem(item)) return true;
+          return true;
+        }
+        if (before.endsWith("\t")) return editor.commands.deleteRange({ from: from - 1, to: from });
         return true;
       },
     };
@@ -177,10 +185,11 @@ export function MarkdownEditor({
 }: Props) {
   const save = useDebounced(onChange, delay);
   const canEdit = useCanEdit();
-  const prefs = usePrefs();
-  const editor = useEditor({
-    editable: canEdit,
-    extensions: [
+  // Built once per page: the editor is created once, and rebuilding this
+  // list every render would only throw it away. The editing-only extensions
+  // are always present; they can't fire while the editor isn't editable.
+  const extensions = useMemo(
+    () => [
       // Clicks on links are handled below so they open in the system browser,
       // not inside the app's own window.
       StarterKit.configure({
@@ -211,7 +220,9 @@ export function MarkdownEditor({
       TableRow,
       TableHeader.extend({ content: "paragraph+" }),
       TableCell.extend({ content: "paragraph+" }),
-      ...(canEdit ? [SlashCommand.configure({ page: page ?? null }), PageLinkSuggestion.configure({ page: page ?? null }), TabKey, MoveBlock] : []),
+      SlashCommand.configure({ page: page ?? null }),
+      TabKey,
+      MoveBlock,
       // The slash menu is how blocks get inserted; say so on the empty line the cursor is on.
       Placeholder.configure({
         placeholder: ({ editor: e }) => (e.isEmpty ? "Write, or type / to insert a block" : "Type / to insert a block"),
@@ -220,6 +231,11 @@ export function MarkdownEditor({
       }),
       Markdown,
     ],
+    [page],
+  );
+  const editor = useEditor({
+    editable: canEdit,
+    extensions,
     content: initial,
     contentType: "markdown",
     editorProps: {
@@ -259,6 +275,11 @@ export function MarkdownEditor({
   useEffect(() => {
     editor?.view.dom.setAttribute("spellcheck", String(prefs.spellCheck));
   }, [editor, prefs.spellCheck]);
+  // A role change arriving over sync (editor to viewer, or back) switches the
+  // live editor; the option above is only read when it's created.
+  useEffect(() => {
+    if (editor && editor.isEditable !== canEdit) editor.setEditable(canEdit);
+  }, [editor, canEdit]);
 
   return (
     <div className="rich">
