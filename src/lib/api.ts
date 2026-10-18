@@ -70,6 +70,8 @@ export interface TreeNode {
   parent: string | null;
   sortKey: string;
   title: string;
+  /** In the layout, but its content hasn't arrived on this device. */
+  missing?: boolean;
 }
 
 export type ViewSort = "updated" | "created" | "title";
@@ -147,6 +149,18 @@ export interface AccountView {
   name: string;
   thisDevice: string;
   devices: DeviceView[];
+  /** When other accounts were folded into this one. */
+  mergedIn: number[];
+  /** This account was folded into another one on another device, at this time. */
+  mergedInto: number | null;
+}
+
+/** What linking this device to another account would do. */
+export interface JoinPreview {
+  accountName: string;
+  devices: number;
+  ownName: string;
+  workspaces: { id: string; name: string; kind: "own" | "shared" | "member"; people: string[] }[];
 }
 
 export interface InviteView {
@@ -186,6 +200,8 @@ export interface PeerStatus {
   lastSync: number | null;
   lastAttempt: number | null;
   lastError: string | null;
+  /** The last attempt never connected: off, asleep, or out of reach. */
+  offline: boolean;
 }
 
 export interface SyncStatus {
@@ -267,6 +283,7 @@ export const api = {
   setUserName: (name: string) => invoke<AccountView>("set_user_name", { name }),
   renameDevice: (device: string, name: string) => invoke<AccountView>("rename_device", { device, name }),
   createLinkCode: (minutes: number) => invoke<InviteView>("create_link_code", { minutes }),
+  previewJoin: (code: string, passphrase: string) => invoke<JoinPreview>("preview_join", { code, passphrase }),
   joinWithCode: (code: string, passphrase: string) => invoke<AccountView>("join_with_code", { code, passphrase }),
   revokeDevice: (device: string) => invoke<AccountView>("revoke_device", { device }),
   /** `recipient` is a person's user ID; leave it out for your own devices. */

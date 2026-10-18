@@ -130,6 +130,8 @@ export class WorkspaceSession {
   private editable = true;
   /** Bumped when another device changes a doc, so open editors reload it. */
   private remoteVersions = new Map<string, number>();
+  /** Docs the tree lists but this device hasn't received; they reload when they arrive. */
+  private missing = new Set<string>();
 
   private constructor(
     readonly id: string,
@@ -196,7 +198,16 @@ export class WorkspaceSession {
   async loadItem<T extends ItemBase>(id: string): Promise<A.Doc<T>> {
     const cached = this.items.get(id);
     if (cached) return cached as A.Doc<T>;
-    const doc = A.load<ItemBase>(await api.loadDoc(this.id, id));
+    let doc: A.Doc<ItemBase>;
+    try {
+      doc = A.load<ItemBase>(await api.loadDoc(this.id, id));
+    } catch (err) {
+      // Listed in the tree but not here yet: another device made it and
+      // hasn't synced the page itself. Reload when it arrives.
+      this.missing.add(id);
+      throw err;
+    }
+    this.missing.delete(id);
     this.items.set(id, doc);
     return doc as A.Doc<T>;
   }
@@ -219,6 +230,8 @@ export class WorkspaceSession {
           this.manifest = A.load<Manifest>(await api.loadDoc(this.id, MANIFEST));
         } else if (this.items.has(id)) {
           this.items.set(id, A.load<ItemBase>(await api.loadDoc(this.id, id)));
+        } else if (this.missing.has(id)) {
+          this.missing.delete(id); // the page's next load fetches it
         } else {
           continue;
         }

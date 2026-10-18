@@ -42,6 +42,13 @@ src/                React frontend
   derived from the passphrase with Argon2id. The passphrase (about 80 bits) is shown on screen
   and never included in the code. Codes expire after 15 minutes by default; the picker on the Devices page allows up to 7 days, for linking a device you can't reach right away. The window only bounds how long a captured code and passphrase stay useful. Expiry is enforced by the app
   opening the code, so treat a code and its passphrase together like a password.
+- **Linking either way.** A device that already has an account can still join another one. Its
+  old account is folded into the new one with a **succession record** (`from`, `to`, time,
+  signed by both keys) kept in the new identity's `predecessors`; devices left on the old
+  account learn it as a `successors` entry and show a notice to link. Membership checks resolve
+  each user key to the account it ended up in (`Members::canon`), so the old key's roles,
+  ownership, and signed records keep counting. A workspace's `owner` field stays the original
+  key; `current_owner()` follows the chain, and records are valid under any key in it.
 
 
 ## Update files

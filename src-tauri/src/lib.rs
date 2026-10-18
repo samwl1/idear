@@ -82,6 +82,7 @@ pub fn run() {
             account::set_user_name,
             account::rename_device,
             account::create_link_code,
+            account::preview_join,
             account::join_with_code,
             account::revoke_device,
             updates::export_update,
