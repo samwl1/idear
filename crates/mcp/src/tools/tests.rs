@@ -15,7 +15,7 @@ use notes_core::identity::{key_id, DeviceCert, IdentityState, NameRecord};
 use notes_core::members::Role;
 use notes_core::Workspace;
 use notes_peer::account::Account;
-use notes_peer::invite::{read_invite, Token};
+use notes_peer::invite::{read_invite, Link};
 use notes_peer::sync::{run_initiator, run_responder, Joins, SyncCtx, ALPN};
 use serde_json::json;
 
@@ -78,6 +78,7 @@ async fn claude_joins_reads_and_writes() {
         account: Arc::new(Mutex::new(Account { user: sam_user.clone(), state: sam.clone(), path: sam_dir.path().join("identity.json") })),
         open: Arc::new(Mutex::new(HashMap::new())),
         joins: Arc::new(Joins::load(sam_dir.path().join("joins.json"))),
+        approvals: Arc::new(notes_peer::sync::Approvals::load(sam_dir.path().join("approvals.json"))),
     };
     let mut m = AutoCommit::new();
     put_text(&mut m, &ROOT, "name", "Team").unwrap();
@@ -141,8 +142,10 @@ async fn claude_joins_reads_and_writes() {
     ws.apply_change(&sam_dev, "manifest", change, "tree.add", Some("flow")).unwrap();
 
     // Sam invites Claude as a viewer.
-    let (invite, secret) = ws.update_members(|m| m.create_invite(&sam_user, "inv", Role::Viewer, "Claude", 600_000)).unwrap();
-    let link = Token { invite, secret: hex::encode(secret), workspace_name: "Team".into(), owner: sam.clone() }.encode().unwrap();
+    let (invite, secret) = ws.update_members(|m| m.create_invite(&sam_user, "0011223344556677", Role::Viewer, "Claude", 600_000, false)).unwrap();
+    // A short link, as the app makes one: nothing but keys, the invite id, and the secret.
+    let link = Link::new(&sam.user, &key_id(&sam_dev.verifying_key()), None, &invite.id, invite.expires, &secret).encode().unwrap();
+    assert!(link.len() < 200, "{}", link.len());
     drop(ws);
 
     // Claude redeems the link.
@@ -150,7 +153,7 @@ async fn claude_joins_reads_and_writes() {
     let peer = Peer::with_keys(claude_dir.path(), key(22), key(2)).unwrap();
     let claude_user = peer.own().unwrap().user;
     assert_eq!(peer.own().unwrap().display_name(), "Claude");
-    peer.service.joins().add(read_invite(&link, &claude_user).unwrap());
+    peer.service.joins().add(read_invite(&link, None, &claude_user).unwrap());
     let (ep_s, ep_c) = (endpoint(&sam_dev).await, endpoint(&key(22)).await);
     sync(&peer.ctx, &ep_c, &cs, &ep_s, &sam.user, true).await;
 

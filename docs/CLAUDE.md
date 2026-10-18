@@ -74,11 +74,12 @@ Only a workspace's owner can give Claude access. If someone shares a workspace w
 want your Claude in it, ask them to invite Claude from their Sharing page, then run:
 
 ```sh
-idear mcp join 'notes-share-1.…'
+idear mcp join 'idear-share-2.…'
 ```
 
-using the full path to idear (shown under Settings → Claude). `idear mcp status` shows Claude's
-identity, device ID, and workspaces.
+using the full path to idear (shown under Settings → Claude). If the invite asks for the owner's
+approval, the command waits while they decide. `idear mcp status` shows Claude's identity, device
+ID, and workspaces.
 
 ## Using it in more than one place
 

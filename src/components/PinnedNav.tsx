@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { api, type ViewRow } from "../lib/api";
 import type { WorkspaceSession } from "../lib/session";
-import { movePin, pinKey, setPinnedSettings, togglePin, usePinnedSettings, usePins, type Pin } from "../lib/pins";
+import { movePin, pinKey, setPinScope, setPinnedSettings, togglePin, usePinnedSettings, usePins, type Pin, type ScopedPin } from "../lib/pins";
+import { useContextMenu } from "./ContextMenu";
 import { useTree } from "../lib/useTree";
 import { Icon, VIEW_ICONS, iconName, type IconName } from "./Icon";
 import { RailSection } from "./RailSection";
+import { showToast } from "../lib/toast";
 
 const KIND_ICON: Record<string, IconName> = { note: "note", whiteboard: "whiteboard", tracker: "project", folder: "folder" };
 
@@ -23,8 +25,17 @@ export function PinnedNav({ session, activeKey, onOpen, onError }: Props) {
   const tasks = usePinnedTasks(session, pins, onError);
   const [dragging, setDragging] = useState<string | null>(null);
   const [over, setOver] = useState<string | null>(null);
+  const menu = useContextMenu();
+  const run = (p: Promise<unknown>) => p.catch(onError);
 
   if (!pins.length) return null;
+
+  const rowMenu = (p: ScopedPin, title: string) => [
+    p.scope === "all"
+      ? { label: "Keep on this device only", onSelect: () => run(setPinScope(session.id, p, "device")) }
+      : { label: "Keep on all my devices", onSelect: () => run(setPinScope(session.id, p, "all")) },
+    { label: `Unpin ${title}`, onSelect: () => run(togglePin(session.id, p)), danger: true, separator: true },
+  ];
 
   const label = (p: Pin): { title: string; icon: IconName; missing: boolean } => {
     switch (p.kind) {
@@ -49,7 +60,7 @@ export function PinnedNav({ session, activeKey, onOpen, onError }: Props) {
 
   const drop = (e: DragEvent, before: string | null) => {
     e.preventDefault();
-    if (dragging) movePin(session.id, dragging, before);
+    if (dragging) run(movePin(session.id, dragging, before));
     setDragging(null);
     setOver(null);
   };
@@ -92,24 +103,27 @@ export function PinnedNav({ session, activeKey, onOpen, onError }: Props) {
                 e.stopPropagation();
                 drop(e, key);
               }}
+              onContextMenu={(e) => menu.open(e, rowMenu(p, l.title))}
             >
               <button
                 className="nav-item"
                 data-active={activeKey === key || undefined}
                 data-missing={l.missing || undefined}
                 disabled={l.missing}
-                title={l.missing ? "This was deleted" : l.title}
+                title={l.missing ? "This was deleted" : p.scope === "device" ? `${l.title} (pinned on this device only)` : l.title}
                 onClick={() => onOpen(p)}
               >
                 <Icon name={l.icon} /> <span className="row-label">{l.title}</span>
+                {p.scope === "device" && <Icon name="bolt" className="pin-device" />}
               </button>
-              <button className="tool pin-x" aria-label={`Unpin ${l.title}`} title="Unpin" onClick={() => togglePin(session.id, p)}>
+              <button className="tool pin-x" aria-label={`Unpin ${l.title}`} title="Unpin" onClick={() => run(togglePin(session.id, p))}>
                 ×
               </button>
             </li>
           );
         })}
       </ul>
+      {menu.menu}
     </RailSection>
   );
 }
@@ -199,7 +213,7 @@ export function PinButton({ workspace, pin, pinned }: { workspace: string; pin: 
       aria-pressed={pinned}
       aria-label={pinned ? "Unpin" : "Pin"}
       title={pinned ? "Unpin" : "Pin to the sidebar"}
-      onClick={() => togglePin(workspace, pin)}
+      onClick={() => togglePin(workspace, pin).catch((e) => showToast(e instanceof Error ? e.message : String(e)))}
     >
       <Icon name="pin" />
     </button>

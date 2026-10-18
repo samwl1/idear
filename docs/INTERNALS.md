@@ -60,6 +60,11 @@ from another device.
   your user key, so only your linked devices can read it.
 - **For a person you share with:** sealed to their box key (X25519 with a fresh sender key per
   file), so only their devices can read it. Holds only workspaces you both have.
+- **Under a passphrase** (either kind): sealed with XChaCha20-Poly1305 under an Argon2id key
+  from a generated passphrase, for a device whose key you don't have yet. The app asks for the
+  passphrase when it opens one. What's inside is still checked change by change, so the
+  passphrase only controls who can read the file, never what counts.
+- **Private docs** (pins) go only in files for your own devices.
 - The header (format version and identities) is authenticated.
 - On import, every event must verify, come from a device allowed to change that workspace at the
   time (see [Sharing](SHARING.md#how-it-works)), and extend that device's history exactly.

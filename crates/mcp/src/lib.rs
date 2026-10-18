@@ -151,28 +151,40 @@ fn joined(peer: &Peer, workspace: &str) -> Option<Role> {
 async fn join(link: &str) -> Res<()> {
     let peer = Peer::open(&data_dir())?;
     let own = peer.own()?;
-    let pending = read_invite(link, &own.user)?;
-    let (ws, name) = (pending.invite.workspace.clone(), pending.workspace_name.clone());
-    if joined(&peer, &ws).is_some() {
-        println!("Claude is already in \"{name}\".");
-        return Ok(());
-    }
-    let owner = pending.owner.display_name();
+    let pending = read_invite(link, None, &own.user)?;
+    let id = pending.invite_id.clone();
     peer.service.joins().add(pending);
     peer.service.start().await;
-    println!("Joining \"{name}\" from {}. Their app needs to be open…", if owner.is_empty() { "the owner" } else { &owner });
+    println!("Joining. The owner's app needs to be open…");
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(120) {
         let _ = tokio::time::timeout(Duration::from_secs(30), peer.service.sync_all()).await;
-        if let Some(role) = joined(&peer, &ws) {
-            let what = if role == Role::Editor { "an editor" } else { "a viewer" };
-            println!("Joined \"{name}\". Claude is {what}.");
+        let entry = peer.service.joins().list().into_iter().find(|j| j.invite_id == id);
+        let Some(j) = entry else {
+            // Gone from the list: finished. Say which workspace, if we can tell.
+            let all = peer.workspaces().unwrap_or_default();
+            if let Some((_, name, role, _)) = all.last() {
+                let what = if *role == Role::Editor { "an editor" } else { "a viewer" };
+                println!("Joined \"{name}\". Claude is {what}.");
+            } else {
+                println!("Joined.");
+            }
             return Ok(());
+        };
+        if !j.workspace.is_empty() {
+            if let Some(role) = joined(&peer, &j.workspace) {
+                let what = if role == Role::Editor { "an editor" } else { "a viewer" };
+                println!("Joined \"{}\". Claude is {what}.", j.workspace_name);
+                peer.service.joins().remove(&id);
+                return Ok(());
+            }
         }
-        if let Some(e) = peer.service.joins().list().iter().find(|j| j.invite.workspace == ws).and_then(|j| j.last_error.clone()) {
+        if j.status == notes_peer::sync::JoinStatus::Waiting {
+            println!("  \"{}\" needs the owner's approval; waiting…", j.workspace_name);
+        } else if let Some(e) = j.last_error.clone() {
             // A refusal from the owner (used, expired, cancelled) won't change by retrying.
             if !e.contains("reachable") && !e.contains("timed out") && !e.contains("Waiting") {
-                peer.service.joins().remove(&ws);
+                peer.service.joins().remove(&id);
                 return Err(e);
             }
             eprintln!("  {e}, retrying…");

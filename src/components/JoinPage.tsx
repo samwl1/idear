@@ -13,6 +13,8 @@ interface Props {
 /** Paste an invite link; the workspace arrives once the owner's device answers. */
 export function JoinPage({ onOpen, onError }: Props) {
   const [token, setToken] = useState("");
+  const [pass, setPass] = useState("");
+  const [needsPass, setNeedsPass] = useState(false);
   const [joins, setJoins] = useState<JoinView[] | null>(null);
   const [joined, setJoined] = useState<JoinView[]>([]);
   const [busy, setBusy] = useState(false);
@@ -24,7 +26,7 @@ export function JoinPage({ onOpen, onError }: Props) {
     try {
       const [list, workspaces] = await Promise.all([api.listJoins(), api.listWorkspaces()]);
       const done = waiting.current.filter(
-        (j) => !list.some((x) => x.workspace === j.workspace) && workspaces.some((w) => w.id === j.workspace),
+        (j) => !list.some((x) => x.id === j.id) && j.workspace && workspaces.some((w) => w.id === j.workspace),
       );
       if (done.length) setJoined((cur) => [...cur, ...done]);
       waiting.current = list;
@@ -40,11 +42,22 @@ export function JoinPage({ onOpen, onError }: Props) {
     return () => clearInterval(t);
   }, [refresh]);
 
+  // A sealed link asks for its passphrase before Join does anything.
+  useEffect(() => {
+    const t = token.trim();
+    if (!t) {
+      setNeedsPass(false);
+      return;
+    }
+    api.inspectInvite(t).then(setNeedsPass, () => setNeedsPass(false));
+  }, [token]);
+
   const join = async () => {
     setBusy(true);
     try {
-      await api.joinShared(token);
+      await api.joinShared(token, needsPass ? pass : undefined);
       setToken("");
+      setPass("");
       // Try right away rather than waiting for the next round.
       api.syncNow().catch(() => {});
       await refresh();
@@ -70,13 +83,27 @@ export function JoinPage({ onOpen, onError }: Props) {
       <section className="card">
         <textarea
           className="field code-box"
-          rows={4}
+          rows={2}
           value={token}
-          placeholder="notes-share-1.…"
+          placeholder="idear-share-2.…"
           aria-label="Invite link"
           onChange={(e) => setToken(e.target.value)}
         />
-        <button className="primary" disabled={busy || !token.trim()} onClick={join}>
+        {needsPass && (
+          <label className="setting">
+            <span>Passphrase</span>
+            <input
+              className="field"
+              value={pass}
+              placeholder="From whoever sent the link"
+              aria-label="Invite passphrase"
+              autoComplete="off"
+              onChange={(e) => setPass(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && pass.trim() && join()}
+            />
+          </label>
+        )}
+        <button className="primary" disabled={busy || !token.trim() || (needsPass && !pass.trim())} onClick={join}>
           {busy ? "Checking…" : "Join"}
         </button>
         <p className="hint">
@@ -93,12 +120,10 @@ export function JoinPage({ onOpen, onError }: Props) {
           <h2>Joined</h2>
           <ul className="people">
             {joined.map((j) => (
-              <li key={j.workspace} className="person">
+              <li key={j.id} className="person">
                 <span className="person-main">
                   <span className="person-name">{j.workspaceName}</span>
-                  <span className="person-meta">
-                    From {j.ownerName || "the owner"}. You're {j.role === "editor" ? "an editor" : "a viewer"}.
-                  </span>
+                  <span className="person-meta">From {j.ownerName || "the owner"}.</span>
                 </span>
                 <span className="person-actions">
                   <button className="primary" onClick={() => onOpen(j.workspace)}>
@@ -116,16 +141,20 @@ export function JoinPage({ onOpen, onError }: Props) {
           <h2>Waiting to join</h2>
           <ul className="people">
             {joins.map((j) => (
-              <li key={j.workspace} className="person">
+              <li key={j.id} className="person">
                 <span className="person-main">
                   <span className="person-name">
-                    {j.workspaceName} <span className="muted">· from {j.ownerName || "the owner"}</span>
+                    {j.workspaceName || "A shared workspace"} <span className="muted">· from {j.ownerName || "the owner"}</span>
                   </span>
                   <span className="person-meta">
-                    <span className="sync-line" data-state={j.lastError ? "warn" : "idle"}>
-                      {j.lastError
-                        ? `${j.lastError}${j.lastAttempt ? `, tried ${ago(j.lastAttempt)}` : ""}`
-                        : "Trying to reach them…"}
+                    <span className="sync-line" data-state={j.status === "declined" ? "error" : j.lastError ? "warn" : "idle"}>
+                      {j.status === "declined"
+                        ? "The owner declined"
+                        : j.status === "waiting"
+                          ? "Waiting for the owner to approve you"
+                          : j.lastError
+                            ? `${j.lastError}${j.lastAttempt ? `, tried ${ago(j.lastAttempt)}` : ""}`
+                            : "Trying to reach them…"}
                     </span>
                   </span>
                 </span>
@@ -133,13 +162,13 @@ export function JoinPage({ onOpen, onError }: Props) {
                   <button
                     className="ghost"
                     onClick={() =>
-                      api.cancelJoin(j.workspace).then((list) => {
+                      api.cancelJoin(j.id).then((list) => {
                         waiting.current = list;
                         setJoins(list);
                       }, onError)
                     }
                   >
-                    Cancel
+                    {j.status === "declined" ? "Dismiss" : "Cancel"}
                   </button>
                 </span>
               </li>

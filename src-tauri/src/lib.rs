@@ -63,6 +63,7 @@ pub fn run() {
                 account: account.clone(),
                 open: open.clone(),
                 joins: Arc::new(sync::Joins::load(data.join("joins.json"))),
+                approvals: Arc::new(sync::Approvals::load(data.join("approvals.json"))),
             };
             let handle = app.handle().clone();
             let on_applied: sync::OnApplied = Arc::new(move |applied| {
@@ -79,6 +80,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::device_id,
             commands::set_spell_check,
+            commands::print_window,
             account::account_info,
             account::set_user_name,
             account::rename_device,
@@ -88,6 +90,7 @@ pub fn run() {
             account::revoke_device,
             updates::export_update,
             updates::import_update,
+            updates::inspect_update,
             commands::sync_status,
             commands::sync_now,
             commands::set_sync_settings,
@@ -114,6 +117,9 @@ pub fn run() {
             share::cancel_invite,
             share::set_member_role,
             share::join_shared,
+            share::inspect_invite,
+            share::list_approvals,
+            share::decide_join,
             share::list_joins,
             share::cancel_join,
             share::share_contacts,

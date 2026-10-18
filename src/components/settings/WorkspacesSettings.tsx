@@ -90,7 +90,7 @@ export function WorkspacesSettings({ workspaces, currentId, onOpen, onCreate, on
       const n = Object.keys(sub.nodes).length;
       const ids = await dst.importSubtree(null, sub, "tree.merge_in");
       await api.deleteWorkspace(from.id);
-      carryPins(from.id, into.id, ids);
+      await carryPins(src, dst, ids);
       setMerging(null);
       showToast(`Merged ${n} item${n === 1 ? "" : "s"} from ${from.name} into ${into.name}`);
       onDeleted(from.id);

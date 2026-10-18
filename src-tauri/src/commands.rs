@@ -66,6 +66,14 @@ pub async fn device_id(state: State<'_, AppState>) -> CmdResult<String> {
     Ok(device_hex(&state.key))
 }
 
+/// The system print dialog for this window, which is also how a note
+/// becomes a PDF (Save as PDF on macOS, Print to File on Linux). The page's
+/// print stylesheet leaves only the note.
+#[tauri::command]
+pub async fn print_window(window: tauri::WebviewWindow) -> CmdResult<()> {
+    window.print().map_err(|e| e.to_string())
+}
+
 /// Turn the webview's spell checker on or off, with the languages to check
 /// against ("en_US", "de_DE"; empty means the system's). On Linux, WebKitGTK
 /// starts with it off and needs telling; the setting is shared by every

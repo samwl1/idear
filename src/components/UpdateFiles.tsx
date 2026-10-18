@@ -30,6 +30,8 @@ export function UpdateFiles({ onImported, onError }: Props) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   /** A person's user ID, or "" for your own devices. */
   const [to, setTo] = useState("");
+  const [sealed, setSealed] = useState(false);
+  const [askPass, setAskPass] = useState<{ path: string; value: string } | null>(null);
 
   useEffect(() => {
     Promise.all([api.listWorkspaces(), api.shareContacts()]).then(([list, people]) => {
@@ -65,9 +67,15 @@ export function UpdateFiles({ onImported, onError }: Props) {
     if (!path) return;
     setBusy(true);
     try {
-      const r = await api.exportUpdate(path, sending, to || undefined);
+      const r = await api.exportUpdate(path, sending, to || undefined, sealed);
       const n = `${r.workspaces} ${r.workspaces === 1 ? "workspace" : "workspaces"} (${size(r.bytes)})`;
-      setExported(contact ? `Saved ${n}. Only ${contact.name} can open it.` : `Saved ${n}.`);
+      setExported(
+        r.passphrase
+          ? `Saved ${n}. It opens with the passphrase ${r.passphrase} (send that by a different route; it isn't shown again).`
+          : contact
+            ? `Saved ${n}. Only ${contact.name} can open it.`
+            : `Saved ${n}.`,
+      );
     } catch (e) {
       onError(e);
     } finally {
@@ -78,9 +86,18 @@ export function UpdateFiles({ onImported, onError }: Props) {
   const doImport = async () => {
     const path = await open({ multiple: false, directory: false, filters: FILTERS });
     if (!path || Array.isArray(path)) return;
+    if (await api.inspectUpdate(path).catch(() => false)) {
+      setAskPass({ path, value: "" });
+      return;
+    }
+    await finishImport(path);
+  };
+
+  const finishImport = async (path: string, passphrase?: string) => {
     setBusy(true);
     try {
-      setImported(await api.importUpdate(path));
+      setImported(await api.importUpdate(path, passphrase));
+      setAskPass(null);
       onImported();
     } catch (e) {
       onError(e);
@@ -115,11 +132,15 @@ export function UpdateFiles({ onImported, onError }: Props) {
               </select>
             </label>
           )}
-          {contact && !contact.canReceiveFiles && (
+          {contact && !contact.canReceiveFiles && !sealed && (
             <p className="report bad small">
-              {contact.name} is on an older version, or you haven't synced with them yet. Sync once, then try again.
+              {contact.name} is on an older version, or you haven't synced with them yet. Sync once, or use a passphrase.
             </p>
           )}
+          <label className="setting setting-check">
+            <input type="checkbox" checked={sealed} onChange={(e) => setSealed(e.target.checked)} />
+            <span>Seal with a passphrase instead{contact ? "" : " (opens on any device that has it)"}</span>
+          </label>
           {offered.length === 0 ? (
             <p className="muted small">No workspaces to send yet.</p>
           ) : (
@@ -134,7 +155,7 @@ export function UpdateFiles({ onImported, onError }: Props) {
           )}
           <button
             className="primary"
-            disabled={busy || sending.length === 0 || (contact && !contact.canReceiveFiles)}
+            disabled={busy || sending.length === 0 || (contact && !contact.canReceiveFiles && !sealed)}
             onClick={doExport}
           >
             <Icon name="inbox" /> Save update file…
@@ -147,6 +168,29 @@ export function UpdateFiles({ onImported, onError }: Props) {
           <button className="primary" disabled={busy} onClick={doImport}>
             <Icon name="inbox" /> Open update file…
           </button>
+          {askPass && (
+            <div className="invite">
+              <label className="setting">
+                <span>This file needs its passphrase</span>
+                <input
+                  className="field"
+                  autoFocus
+                  autoComplete="off"
+                  value={askPass.value}
+                  onChange={(e) => setAskPass({ ...askPass, value: e.target.value })}
+                  onKeyDown={(e) => e.key === "Enter" && askPass.value.trim() && finishImport(askPass.path, askPass.value)}
+                />
+              </label>
+              <span className="row-actions">
+                <button className="ghost" onClick={() => setAskPass(null)}>
+                  Cancel
+                </button>
+                <button className="primary" disabled={busy || !askPass.value.trim()} onClick={() => finishImport(askPass.path, askPass.value)}>
+                  Open
+                </button>
+              </span>
+            </div>
+          )}
           {imported && <ImportResult r={imported} />}
         </div>
       </div>

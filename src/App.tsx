@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { api, canEditRole, type WorkspaceInfo } from "./lib/api";
 import { CanEditContext } from "./lib/access";
+import { attachPins, detachPins } from "./lib/pins";
 import { SharePage } from "./components/SharePage";
 import { JoinPage } from "./components/JoinPage";
 import { initAutomerge } from "./lib/automerge";
@@ -27,7 +28,7 @@ import { AccessibilitySettings, AppearanceSettings } from "./components/settings
 import { WorkspacesSettings } from "./components/settings/WorkspacesSettings";
 import { ClaudeSettings } from "./components/settings/ClaudeSettings";
 import { zoomStep } from "./lib/prefs";
-import { dismissToast, showError, useToast } from "./lib/toast";
+import { dismissToast, showError, showToast, useToast } from "./lib/toast";
 import { CommandPalette } from "./components/CommandPalette";
 import { SyncIndicator } from "./components/SyncIndicator";
 import type { ItemKind } from "./lib/session";
@@ -53,8 +54,13 @@ export default function App() {
   const [pane, setPane] = useState<Pane>(null);
   const sidebar = useSidebar();
   const toast = useToast();
-  const [account, setAccount] = useState<AccountView | null>(null);
-  const accountCtx = useMemo(() => ({ account, setAccount }), [account]);
+  const [account, setAccountState] = useState<AccountView | null>(null);
+  // The private doc (pins) is named after the account, so the session needs to know it.
+  const setAccount = useCallback((a: AccountView) => {
+    WorkspaceSession.user = a.userId;
+    setAccountState(a);
+  }, []);
+  const accountCtx = useMemo(() => ({ account, setAccount }), [account, setAccount]);
   const [, rerender] = useReducer((n: number) => n + 1, 0);
 
   // Re-render on workspace changes so a deleted note closes its editor.
@@ -67,6 +73,13 @@ export default function App() {
     console.error(err);
     showError(err instanceof Error ? err.message : String(err));
   }, []);
+
+  // Pins live in the account's private doc for the workspace.
+  useEffect(() => {
+    if (!session) return;
+    attachPins(session, onError);
+    return () => detachPins(session);
+  }, [session, onError]);
 
   /** `stay` keeps the current page (e.g. Settings) instead of going home. */
   const openWorkspace = useCallback(
@@ -215,6 +228,16 @@ export default function App() {
           payload.removedWorkspaces?.length
         ) {
           setWorkspaces(await api.listWorkspaces());
+        }
+        if (payload.approvalsChanged) {
+          const waiting = await api.listApprovals();
+          const a = waiting[waiting.length - 1];
+          if (a) {
+            showToast(`${a.name || "Someone"} wants to join ${a.workspaceName} as ${a.role === "editor" ? "an editor" : "a viewer"}`, {
+              action: { label: "Review", run: () => setPane({ type: "settings", tab: "sharing", workspace: a.workspace }) },
+              ttl: 15000,
+            });
+          }
         }
         const docs = session ? payload.changed[session.id] : undefined;
         if (session && docs) await session.applyRemote(docs);

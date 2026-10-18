@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type PersonView, type Role, type ShareInfo, type ShareInvite, type SyncStatus, type WorkspaceInfo } from "../lib/api";
+import { api, type ApprovalView, type PersonView, type Role, type ShareInfo, type ShareInvite, type SyncStatus, type WorkspaceInfo } from "../lib/api";
 import { ago, copy } from "../lib/clipboard";
+import { fingerprint } from "../lib/account";
 import { useNav } from "../lib/nav";
 import { Icon } from "./Icon";
 
@@ -140,6 +141,7 @@ export function SharePage({ workspaceId, workspaceName, workspaces, onPick, onCh
         </p>
       </section>
 
+      {info.isOwner && <Approvals workspaceId={workspaceId} onDecided={refresh} onError={onError} />}
       {info.isOwner && <Invites workspaceId={workspaceId} invites={info.invites} people={info.people} onInfo={update} onError={onError} />}
     </section>
   );
@@ -237,15 +239,17 @@ function Invites({
 }) {
   const [role, setRole] = useState<"editor" | "viewer">("editor");
   const [label, setLabel] = useState("");
-  const [days, setDays] = useState(7);
-  const [token, setToken] = useState<string | null>(null);
+  const [hours, setHours] = useState(24);
+  const [approve, setApprove] = useState(true);
+  const [sealed, setSealed] = useState(false);
+  const [made, setMade] = useState<{ token: string; passphrase: string | null } | null>(null);
   const [copied, setCopied] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
 
   const create = async () => {
     try {
-      const r = await api.createInvite(workspaceId, role, label, days);
-      setToken(r.token);
+      const r = await api.createInvite(workspaceId, role, label, hours, approve, sealed);
+      setMade({ token: r.token, passphrase: r.passphrase });
       setCopied(false);
       setLabel("");
       onInfo(Promise.resolve(r.info));
@@ -261,8 +265,9 @@ function Invites({
     <section className="card">
       <h2>Invite someone</h2>
       <p className="muted small">
-        Creates a one-time invite link. Send it privately: whoever uses it first joins, so treat it like a password.
-        They need this app, and your device has to be online once for them to join.
+        Creates a one-time invite link, short enough to paste anywhere. Whoever uses it first gets in, so by default you
+        confirm who that is before they're added. For a link that's useless on its own, add a passphrase and send it
+        another way. They need this app, and your device has to be online for them to join.
       </p>
       <div className="invite-form">
         <label className="setting">
@@ -284,24 +289,39 @@ function Invites({
         </label>
         <label className="setting">
           <span>Link works for</span>
-          <select className="field" value={days} onChange={(e) => setDays(Number(e.target.value))}>
-            <option value={1}>1 day</option>
-            <option value={7}>7 days</option>
-            <option value={30}>30 days</option>
+          <select className="field" value={hours} onChange={(e) => setHours(Number(e.target.value))}>
+            <option value={1}>1 hour</option>
+            <option value={24}>24 hours</option>
+            <option value={7 * 24}>7 days</option>
+            <option value={30 * 24}>30 days</option>
           </select>
+        </label>
+        <label className="setting setting-check">
+          <input type="checkbox" checked={approve} onChange={(e) => setApprove(e.target.checked)} />
+          <span>Ask me before they're added</span>
+        </label>
+        <label className="setting setting-check">
+          <input type="checkbox" checked={sealed} onChange={(e) => setSealed(e.target.checked)} />
+          <span>Protect with a passphrase</span>
         </label>
         <button className="primary" onClick={create}>
           <Icon name="link" /> Create invite link
         </button>
       </div>
 
-      {token && (
+      {made && (
         <div className="invite">
-          <textarea ref={area} className="field code-box" readOnly value={token} rows={4} />
-          <button className="ghost" onClick={() => copy(token, area.current).then(setCopied)}>
+          <textarea ref={area} className="field code-box" readOnly value={made.token} rows={2} />
+          <button className="ghost" onClick={() => copy(made.token, area.current).then(setCopied)}>
             {copied ? "Copied" : "Copy invite link"}
           </button>
-          <p className="hint">They paste it under Join a shared workspace, in the workspace menu or Settings.</p>
+          {made.passphrase && (
+            <p className="invite-pass">
+              Passphrase: <code>{made.passphrase}</code>
+              <span className="muted small"> Read it to them or send it by a different route than the link. It isn't shown again.</span>
+            </p>
+          )}
+          <p className="hint">They paste the link under Join a shared workspace, in the workspace menu or Settings.</p>
         </div>
       )}
 
@@ -313,7 +333,7 @@ function Invites({
               <li key={i.id} className="invite-row" data-status={i.status}>
                 <span className="person-main">
                   <span className="person-name">
-                    {i.label || "Untitled invite"} <span className="muted">· {ROLE_LABEL[i.role]}</span>
+                    {i.label || "Untitled invite"} <span className="muted">· {ROLE_LABEL[i.role]}{i.approve ? " · you approve" : ""}</span>
                   </span>
                   <span className="person-meta">
                     {i.status === "open" && `Expires ${ago(i.expires)}`}
@@ -331,6 +351,58 @@ function Invites({
           </ul>
         </>
       )}
+    </section>
+  );
+}
+
+/** People who used one of this workspace's invites and are waiting on you. */
+function Approvals({ workspaceId, onDecided, onError }: { workspaceId: string; onDecided: () => void; onError: (err: unknown) => void }) {
+  const [waiting, setWaiting] = useState<ApprovalView[]>([]);
+  useEffect(() => {
+    let live = true;
+    const poll = () => api.listApprovals().then((l) => live && setWaiting(l), () => {});
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, []);
+  const here = waiting.filter((a) => a.workspace === workspaceId);
+  if (!here.length) return null;
+  const decide = (a: ApprovalView, approve: boolean) =>
+    api.decideJoin(a.invite, a.user, approve).then((l) => {
+      setWaiting(l);
+      onDecided();
+    }, onError);
+  return (
+    <section className="card notice">
+      <h2>Waiting for your approval</h2>
+      <ul className="invite-list">
+        {here.map((a) => (
+          <li key={`${a.invite}:${a.user}`} className="invite-row">
+            <span className="person-main">
+              <span className="person-name">
+                {a.name || "Someone"} <span className="muted">· wants to join as {a.role === "editor" ? "an editor" : "a viewer"}</span>
+              </span>
+              <span className="person-meta">
+                Asked {ago(a.asked)} · account <code className="fp fp-full">{fingerprint(a.fingerprint)}</code>
+              </span>
+            </span>
+            <span className="row-actions">
+              <button className="ghost" onClick={() => decide(a, false)}>
+                Decline
+              </button>
+              <button className="primary" onClick={() => decide(a, true)}>
+                Approve
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <p className="muted small">
+        Not sure it's them? Read the account fingerprint back to them over a call or message; theirs is on their Devices page.
+      </p>
     </section>
   );
 }

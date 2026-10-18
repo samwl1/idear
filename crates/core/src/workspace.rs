@@ -54,6 +54,20 @@ pub struct WorkspaceSummary {
     pub seqs: std::collections::BTreeMap<String, u64>,
 }
 const ITEM_KINDS: &[&str] = &["note", "whiteboard", "tracker"];
+/// A doc that belongs to one member and syncs only between their own
+/// devices: pins today. Its id is `private-<their user key>`, so each
+/// member has at most one per workspace. Never sent to other people.
+pub const PRIVATE: &str = "private";
+
+/// The id of `user`'s private doc in a workspace.
+pub fn private_doc_id(user: &str) -> String {
+    format!("{PRIVATE}-{}", &user[..user.len().min(48)])
+}
+
+/// Whether `id` is some member's private doc.
+pub fn is_private_doc(id: &str) -> bool {
+    id.starts_with("private-")
+}
 
 pub struct Workspace {
     pub id: String,
@@ -83,10 +97,14 @@ impl Workspace {
         Ok(ws)
     }
 
-    /// Everything in this workspace, for an update file.
-    pub fn export(&mut self) -> Result<WorkspaceBundle> {
+    /// Everything in this workspace, for an update file. `private` includes
+    /// members' private docs, which only your own devices should get.
+    pub fn export(&mut self, private: bool) -> Result<WorkspaceBundle> {
         let mut docs = Vec::new();
         for (id, kind) in self.index.docs()? {
+            if kind == PRIVATE && !private {
+                continue;
+            }
             if self.docs.exists(&id)? {
                 docs.push(DocBundle::new(&id, &kind, &self.docs.save_bytes(&id)?));
             }
@@ -94,9 +112,14 @@ impl Workspace {
         Ok(WorkspaceBundle { id: self.id.clone(), name: self.name()?, docs, events: self.log.all()? })
     }
 
-    pub fn summary(&mut self) -> Result<WorkspaceSummary> {
+    /// What this copy has, for a peer to compute a delta. `private`: whether
+    /// the peer is one of your own devices and may know about private docs.
+    pub fn summary(&mut self, private: bool) -> Result<WorkspaceSummary> {
         let mut docs = std::collections::BTreeMap::new();
-        for (id, _) in self.index.docs()? {
+        for (id, kind) in self.index.docs()? {
+            if kind == PRIVATE && !private {
+                continue;
+            }
             if let Some(doc) = self.docs.peek(&id)? {
                 docs.insert(id, doc.get_heads().iter().map(|h| h.to_string()).collect());
             }
@@ -106,9 +129,9 @@ impl Workspace {
 
     /// Only what a peer with `theirs` is missing. Without a summary (they
     /// don't have this workspace), everything.
-    pub fn delta_for(&mut self, theirs: Option<&WorkspaceSummary>) -> Result<WorkspaceBundle> {
+    pub fn delta_for(&mut self, theirs: Option<&WorkspaceSummary>, private: bool) -> Result<WorkspaceBundle> {
         use automerge::ReadDoc;
-        let Some(theirs) = theirs else { return self.export() };
+        let Some(theirs) = theirs else { return self.export(private) };
         let events = self
             .log
             .all()?
@@ -117,6 +140,9 @@ impl Workspace {
             .collect();
         let mut docs = Vec::new();
         for (id, kind) in self.index.docs()? {
+            if kind == PRIVATE && !private {
+                continue;
+            }
             let Some(doc) = self.docs.peek(&id)? else { continue };
             match theirs.docs.get(&id) {
                 None => docs.push(DocBundle::new(&id, &kind, &doc.save())),
@@ -206,8 +232,8 @@ impl Workspace {
         let mut docs: Vec<&DocBundle> = wb.docs.iter().collect();
         docs.sort_by_key(|d| d.kind != MANIFEST);
         for d in docs {
-            let kind_ok = d.kind == MANIFEST || ITEM_KINDS.contains(&d.kind.as_str());
-            if validate_id(&d.id).is_err() || !kind_ok || (d.kind == MANIFEST) != (d.id == MANIFEST) {
+            let kind_ok = d.kind == MANIFEST || d.kind == PRIVATE || ITEM_KINDS.contains(&d.kind.as_str());
+            if validate_id(&d.id).is_err() || !kind_ok || (d.kind == MANIFEST) != (d.id == MANIFEST) || (d.kind == PRIVATE) != is_private_doc(&d.id) {
                 report.problems.push(format!("skipped an unrecognized doc ({})", d.kind));
                 continue;
             }
@@ -387,7 +413,7 @@ impl Workspace {
     ) -> Result<Event> {
         validate_id(doc_id)?;
         validate_action(action)?;
-        if !ITEM_KINDS.contains(&kind) {
+        if !ITEM_KINDS.contains(&kind) && !(kind == PRIVATE && is_private_doc(doc_id)) {
             return Err(CoreError::Invalid(format!("doc kind {kind:?}")));
         }
         let heads: Vec<String> = self
@@ -559,6 +585,8 @@ impl Workspace {
                     self.index.sync_phases(doc_id, &phases, device, ts)?;
                 }
             }
+            // Nothing to index: private docs are read whole by their owner.
+            PRIVATE => {}
             other => return Err(CoreError::Invalid(format!("doc kind {other:?}"))),
         }
         Ok(())

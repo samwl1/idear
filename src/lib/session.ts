@@ -142,7 +142,17 @@ export type DropRef = { before: string } | { after: string } | { end: true };
 
 type Listener = () => void;
 
+/** What's pinned in a workspace, for one account: syncs between its devices only. */
+export type PrivateDoc = {
+  pins: PrivatePin[];
+};
+/** A pin as stored in the private doc: a Pin without device-only scope. */
+export type PrivatePin = Record<string, string>;
+
 export class WorkspaceSession {
+  /** This account's user key, set once at startup; private docs are named by it. */
+  static user: string | null = null;
+
   private queue: Promise<unknown> = Promise.resolve();
   private listeners = new Set<Listener>();
   private items = new Map<string, A.Doc<ItemBase>>();
@@ -152,6 +162,8 @@ export class WorkspaceSession {
   private remoteVersions = new Map<string, number>();
   /** Docs the tree lists but this device hasn't received; they reload when they arrive. */
   private missing = new Set<string>();
+  /** This account's private doc (pins), once loaded. */
+  private privateDoc: A.Doc<PrivateDoc> | null = null;
 
   private constructor(
     readonly id: string,
@@ -179,6 +191,50 @@ export class WorkspaceSession {
 
   private emit() {
     this.listeners.forEach((fn) => fn());
+  }
+
+  // ---- private doc (pins) -----------------------------------------------------
+
+  /** The id of this account's private doc here, or null before the account is known. */
+  get privateId(): string | null {
+    return WorkspaceSession.user ? `private-${WorkspaceSession.user.slice(0, 48)}` : null;
+  }
+
+  /**
+   * This account's private doc, created on first use. Viewers can write it
+   * too: it never reaches anyone else's devices.
+   */
+  async loadPrivate(): Promise<A.Doc<PrivateDoc>> {
+    if (this.privateDoc) return this.privateDoc;
+    const id = this.privateId;
+    if (!id) throw new Error("The account isn't known yet");
+    try {
+      this.privateDoc = A.load<PrivateDoc>(await api.loadDoc(this.id, id));
+    } catch {
+      const doc = A.from<PrivateDoc>({ pins: [] });
+      await this.enqueue(() => api.createDoc(this.id, id, "private", A.save(doc), "private.create"));
+      this.privateDoc = doc;
+    }
+    return this.privateDoc;
+  }
+
+  /** The private doc if it's loaded; otherwise null (see loadPrivate). */
+  get privateSnapshot(): A.Doc<PrivateDoc> | null {
+    return this.privateDoc;
+  }
+
+  changePrivate(fn: A.ChangeFn<PrivateDoc>): Promise<void> {
+    const id = this.privateId;
+    if (!id || !this.privateDoc) return Promise.reject(new Error("Private doc isn't loaded"));
+    return this.commit<PrivateDoc>(
+      id,
+      () => this.privateDoc as A.Doc<PrivateDoc>,
+      (d) => (this.privateDoc = d),
+      "private.edit",
+      fn,
+      undefined,
+      true,
+    );
   }
 
   // ---- reads ----------------------------------------------------------------
@@ -252,6 +308,8 @@ export class WorkspaceSession {
           this.items.set(id, A.load<ItemBase>(await api.loadDoc(this.id, id)));
         } else if (this.missing.has(id)) {
           this.missing.delete(id); // the page's next load fetches it
+        } else if (id === this.privateId && this.privateDoc) {
+          this.privateDoc = A.load<PrivateDoc>(await api.loadDoc(this.id, id));
         } else {
           continue;
         }
@@ -279,8 +337,10 @@ export class WorkspaceSession {
     action: string,
     fn: A.ChangeFn<T>,
     subject?: string,
+    /** The private doc is yours whatever your role. */
+    private_ = false,
   ): Promise<void> {
-    if (!this.editable) return Promise.reject(new Error(READ_ONLY));
+    if (!this.editable && !private_) return Promise.reject(new Error(READ_ONLY));
     return this.enqueue(async () => {
       const before = get();
       const after = A.change(before, fn);
