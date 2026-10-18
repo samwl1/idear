@@ -49,12 +49,28 @@ function describe(s: SyncStatus): { state: State; label: string; detail: string 
   if (s.settings.relay && !s.relayConnected) {
     return { state: "warn", label: "No relay", detail: `Can't reach the relay, so only devices on this network sync. ${lastText}` };
   }
-  if (failing.length && failing.length === peers.length) {
-    return { state: "error", label: "Sync failing", detail: `${failing[0].lastError}. ${lastText}` };
+  // A device that can't be reached is off or asleep, which is normal; a device
+  // that was reached and then failed is a problem worth red.
+  const broken = failing.filter((p) => !p.offline);
+  if (broken.length && broken.length + failing.filter((p) => p.offline).length === peers.length) {
+    return { state: "error", label: "Sync failing", detail: `${broken[0].lastError}. ${lastText}` };
   }
   if (!s.settings.relay) return { state: "local", label: "Local only", detail: `Syncing on this network only. ${lastText}` };
-  if (!peers.length) return { state: "local", label: "No devices", detail: "Live sync is on. Link another device or join a shared workspace to sync." };
-  return { state: "ok", label: last ? `Synced ${brief(last)}` : "Synced", detail: failing.length ? `${failing.length} device(s) can't be reached. ${lastText}` : lastText };
+  if (!peers.length) return { state: "local", label: "No devices", detail: "Live sync is on. Add another device or join a shared workspace to sync." };
+  if (failing.length === peers.length) {
+    const n = peers.length;
+    return {
+      state: "local",
+      label: n === 1 ? "Other device offline" : "Other devices offline",
+      detail: `${n === 1 ? "Your other device" : `None of your ${n} other devices`} can't be reached right now. ${lastText}`,
+    };
+  }
+  const notes = [
+    broken.length ? `${broken.length} device${broken.length === 1 ? "" : "s"} failing: ${broken[0].lastError}.` : "",
+    failing.length - broken.length > 0 ? `${failing.length - broken.length} offline.` : "",
+    lastText,
+  ].filter(Boolean);
+  return { state: broken.length ? "warn" : "ok", label: last ? `Synced ${brief(last)}` : "Synced", detail: notes.join(" ") };
 }
 
 /** "2m", "3h", "5d": short enough for the footer. */

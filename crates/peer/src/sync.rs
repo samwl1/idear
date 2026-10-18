@@ -305,17 +305,37 @@ impl SyncCtx {
             }
             return Ok((Peer::Own, changed));
         }
-        Ok((Peer::Other(theirs), false))
+        // Their account took ours over (linked on another of our devices):
+        // remember it, so this device can say it should link too.
+        let mut changed = false;
+        if theirs.is_or_succeeds(&own.user) {
+            if let Ok(mut a) = self.account.lock() {
+                if a.state.learn_successor(&theirs) {
+                    a.save()?;
+                    changed = true;
+                }
+            }
+        }
+        Ok((Peer::Other(theirs), changed))
     }
 
     /// Membership records to open a session with: your own, to prove your
     /// access, and the other person's, so they learn a new role (like being
     /// restored after removal) even while their copy would refuse you.
-    fn proofs(&self, peer_user: Option<&str>) -> Res<Vec<MemberRecord>> {
+    ///
+    /// Only workspaces the other side is already part of are mentioned. The
+    /// Intro goes out before anyone is authorized, so a stranger must not
+    /// learn which workspaces you are in from it. `device` is who we are
+    /// talking to; `peer_user` is who we expect that to be, when known.
+    fn proofs(&self, peer_user: Option<&str>, device: &str) -> Res<Vec<MemberRecord>> {
         self.with_workspaces(|open, ids, own| {
             Ok(ids
                 .iter()
                 .filter_map(|id| open.get(id).and_then(|w| w.members()))
+                .filter(|m| {
+                    m.device_has_access(device, own)
+                        || peer_user.is_some_and(|u| m.role(u).is_some())
+                })
                 .flat_map(|m| {
                     m.records
                         .iter()
@@ -358,15 +378,16 @@ impl SyncCtx {
             let mut removed = Vec::new();
             for id in ids {
                 let ws = open.get_mut(id).expect("opened");
-                let m = ws.members().expect("ensured").clone();
                 match peer {
                     Peer::Own => shared.push(id.clone()),
                     Peer::Other(theirs) => {
+                        // Their identity first: an account that succeeded a member is
+                        // only recognised once its succession record is known here.
+                        ws.learn_identity(theirs).map_err(err)?;
+                        let m = ws.members().expect("ensured").clone();
                         let me_ok = m.role(&own.user).is_some_and(Role::has_access);
                         match m.role(&theirs.user) {
                             Some(r) if r.has_access() && me_ok => {
-                                // Keep their devices and addresses current.
-                                ws.learn_identity(theirs).map_err(err)?;
                                 shared.push(id.clone());
                             }
                             Some(Role::Removed) => {
@@ -416,10 +437,16 @@ impl SyncCtx {
             if incoming.workspace != s.summary.id {
                 continue;
             }
+            let known = open.contains_key(&s.summary.id) || self.root.join(&s.summary.id).exists();
             let local = match open.get(&s.summary.id) {
                 Some(ws) => ws.members().cloned(),
                 None => Workspace::open(&self.root, &s.summary.id).ok().and_then(|w| w.members().cloned()),
             };
+            // A copy we already hold without membership records is one this
+            // account made before sharing existed: it is ours, whatever the
+            // sender's records say. Only a workspace new to this device takes
+            // the sender's word, and then only from its owner (checked below).
+            let local = local.or_else(|| known.then(|| Members::new(&s.summary.id, &own)));
             let effective = match local {
                 Some(mut l) => {
                     if l.merge(&incoming).is_err() {
@@ -434,13 +461,12 @@ impl SyncCtx {
                 Peer::Other(ids) => {
                     let they = effective.role(&ids.user).is_some_and(Role::has_access);
                     let me = effective.role(&own.user).is_some_and(Role::has_access);
-                    let known = open.contains_key(&s.summary.id) || self.root.join(&s.summary.id).exists();
                     // A workspace new to this device only comes from its owner, for an invite we redeemed.
                     let invited = self
                         .joins
                         .get(&s.summary.id)
                         .is_some_and(|j| j.owner.user == ids.user && j.invite.workspace == s.summary.id);
-                    they && me && (known || (invited && effective.owner == ids.user))
+                    they && me && (known || (invited && effective.is_owner(&ids.user)))
                 }
             };
             if ok {
@@ -543,7 +569,7 @@ impl SyncCtx {
         }
         let ws = open.get_mut(&req.workspace).expect("opened");
         let m = ws.ensure_members(&own).map_err(err)?.clone();
-        if m.owner != own.user {
+        if !m.is_owner(&own.user) {
             return Err("This device doesn't own that workspace.".into());
         }
         // Already redeemed by this person (e.g. a retry after a dropped connection): fine.
@@ -743,13 +769,13 @@ pub async fn run_initiator(
     join: Option<JoinRequest>,
 ) -> Res<Applied> {
     let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
-    let proofs = { let c = ctx.clone(); blocking(move || c.proofs(peer_user.as_deref())).await? };
+    let device = hex::encode(conn.remote_id().as_bytes());
+    let proofs = { let (c, d) = (ctx.clone(), device.clone()); blocking(move || c.proofs(peer_user.as_deref(), &d)).await? };
     write_frame(&mut send, &Intro { identity: ctx.own()?, join, proofs }).await?;
     let theirs = match read_frame::<Reply>(&mut recv, INTRO_LIMIT).await? {
         Reply::Welcome(intro) => intro,
         Reply::Refused(reason) => return Err(reason),
     };
-    let device = hex::encode(conn.remote_id().as_bytes());
     let (peer, identity_changed) = ctx.authorize(&device, &theirs.identity)?;
     let learned = learn_proofs(ctx, &peer, theirs.proofs).await?;
     let (shared, removed) = { let (c, p) = (ctx.clone(), peer.clone()); blocking(move || c.shared_with(&p)).await? };
@@ -803,7 +829,7 @@ pub async fn run_responder(ctx: &SyncCtx, conn: Connection) -> Res<(String, Appl
         Peer::Own => None,
         Peer::Other(theirs) => Some(theirs.user.clone()),
     };
-    let proofs = { let c = ctx.clone(); blocking(move || c.proofs(peer_user.as_deref())).await? };
+    let proofs = { let (c, d) = (ctx.clone(), device.clone()); blocking(move || c.proofs(peer_user.as_deref(), &d)).await? };
     write_frame(&mut send, &Reply::Welcome(Intro { identity: ctx.own()?, join: None, proofs })).await?;
     let mut applied = exchange(ctx, peer, shared, removed, &mut send, &mut recv).await?;
     applied.identity_changed |= identity_changed;
@@ -857,6 +883,10 @@ pub struct PeerStatus {
     pub last_sync: Option<i64>,
     pub last_attempt: Option<i64>,
     pub last_error: Option<String>,
+    /// The last attempt never got a connection: the device is off, asleep, or
+    /// out of reach, as opposed to reached and then refused or failed.
+    #[serde(default)]
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -980,7 +1010,7 @@ impl SyncService {
                 let session = tokio::time::timeout(SESSION_TIMEOUT, run_responder(&me.ctx, conn)).await;
                 match session {
                     Ok(Ok((peer, applied))) => {
-                        me.record(&peer, None, None);
+                        me.record(&peer, None, None, false);
                         me.publish(applied);
                     }
                     Ok(Err(e)) => me.problem(e),
@@ -1060,25 +1090,28 @@ impl SyncService {
                 s.last_attempt = Some(now());
             }
             let joining = t.join.as_ref().map(|j| j.workspace.clone());
-            let result = async {
+            // Errors carry whether a connection was ever made: a device that
+            // can't be reached is a different story from one that refused us.
+            let result: std::result::Result<Applied, (String, bool)> = async {
                 let conn = tokio::time::timeout(CONNECT_TIMEOUT, ep.connect(t.addr, ALPN))
                     .await
-                    .map_err(|_| "not reachable right now".to_string())?
-                    .map_err(err)?;
+                    .map_err(|_| ("not reachable right now".to_string(), true))?
+                    .map_err(|e| (err(e), true))?;
                 tokio::time::timeout(SESSION_TIMEOUT, run_initiator(&self.ctx, conn, Some(t.user.clone()), t.join))
                     .await
-                    .map_err(|_| "sync timed out".to_string())?
+                    .map_err(|_| ("sync timed out".to_string(), false))?
+                    .map_err(|e| (e, false))
             }
             .await;
             if let Some(ws) = &joining {
-                self.finish_join(ws, result.as_ref().err().cloned());
+                self.finish_join(ws, result.as_ref().err().map(|(e, _)| e.clone()));
             }
             match result {
                 Ok(applied) => {
-                    self.record(&device, Some(&t.user), None);
+                    self.record(&device, Some(&t.user), None, false);
                     self.publish(applied);
                 }
-                Err(e) => self.record(&device, Some(&t.user), Some(e)),
+                Err((e, offline)) => self.record(&device, Some(&t.user), Some(e), offline),
             }
         }
     }
@@ -1113,7 +1146,7 @@ impl SyncService {
         }
     }
 
-    fn record(&self, device: &str, user: Option<&str>, error: Option<String>) {
+    fn record(&self, device: &str, user: Option<&str>, error: Option<String>, offline: bool) {
         if let Ok(mut p) = self.peers.lock() {
             let s = p.entry(device.to_string()).or_default();
             if let Some(u) = user {
@@ -1122,6 +1155,7 @@ impl SyncService {
             if error.is_none() {
                 s.last_sync = Some(now());
             }
+            s.offline = error.is_some() && offline;
             s.last_error = error;
         }
     }

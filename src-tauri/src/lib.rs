@@ -37,12 +37,25 @@ pub fn run() {
             let root = data.join("workspaces");
             std::fs::create_dir_all(&root)?;
             let key = keychain::APP.load_or_create(keychain::DEVICE_KEY)?;
-            let account = Arc::new(Mutex::new(account::Account::open(
+            let account = match account::Account::open(
                 data.join("identity.json"),
                 &key,
                 keychain::APP,
                 &keychain::default_device_name(),
-            )?));
+            ) {
+                Ok(a) => Arc::new(Mutex::new(a)),
+                Err(e) => {
+                    // Say why before quitting: a silent exit, or worse a silent
+                    // fresh identity, would be far harder to recover from.
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    app.dialog()
+                        .message(&e)
+                        .title("idear can't open your account")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    return Err(e.into());
+                }
+            };
             let open = Arc::new(Mutex::new(HashMap::new()));
             let ctx = sync::SyncCtx {
                 root: root.clone(),
@@ -69,6 +82,7 @@ pub fn run() {
             account::set_user_name,
             account::rename_device,
             account::create_link_code,
+            account::preview_join,
             account::join_with_code,
             account::revoke_device,
             updates::export_update,

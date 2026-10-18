@@ -3,8 +3,9 @@
 
 use ed25519_dalek::SigningKey;
 use notes_core::identity::{
-    create_invite, key_id, new_passphrase, open_invite, DeviceCert, NameRecord, Revocation,
+    create_invite, key_id, new_passphrase, open_invite, DeviceCert, NameRecord, Revocation, Succession,
 };
+use notes_core::members::Role;
 use serde::Serialize;
 use tauri::State;
 
@@ -35,6 +36,11 @@ pub struct AccountView {
     name: String,
     this_device: String,
     devices: Vec<DeviceView>,
+    /// Accounts folded into this one: when, for the Devices page.
+    merged_in: Vec<i64>,
+    /// This account was folded into another one, on another device, at this
+    /// time. This device should link to that account to carry on.
+    merged_into: Option<i64>,
 }
 
 fn view(account: &Account, device: &SigningKey) -> AccountView {
@@ -52,7 +58,14 @@ fn view(account: &Account, device: &SigningKey) -> AccountView {
         })
         .collect();
     devices.sort_by_key(|d| (!d.this_device, d.revoked.is_some(), d.linked));
-    AccountView { user_id: account.state.user.clone(), name: account.state.display_name(), this_device: me, devices }
+    AccountView {
+        user_id: account.state.user.clone(),
+        name: account.state.display_name(),
+        this_device: me,
+        devices,
+        merged_in: account.state.predecessors.iter().map(|p| p.at).collect(),
+        merged_into: account.state.successors.iter().map(|p| p.at).max(),
+    }
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -128,8 +141,59 @@ pub async fn create_link_code(state: State<'_, AppState>, minutes: Option<i64>) 
     })
 }
 
-/// Join another device's identity. This device's own certificate is issued
+/// What linking this device to the account in `code` would do, for the
+/// confirmation screen: whose account it is, and what this device brings.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinPreview {
+    /// The other account's name, if it has one.
+    account_name: String,
+    /// How many devices that account already has.
+    devices: usize,
+    /// This device's account name, if any.
+    own_name: String,
+    /// This device's workspaces and what happens to each.
+    workspaces: Vec<WorkspaceMove>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMove {
+    id: String,
+    name: String,
+    /// "own" (yours alone), "shared" (yours, shared with others), or "member" (someone else's).
+    kind: &'static str,
+    /// The other people in it, by name.
+    people: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn preview_join(state: State<'_, AppState>, code: String, passphrase: String) -> CmdResult<JoinPreview> {
+    let payload = tauri::async_runtime::spawn_blocking(move || open_invite(&code, &passphrase))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let (own_name, own_user) = {
+        let a = state.account.lock().map_err(|_| "account lock poisoned".to_string())?;
+        (a.state.display_name(), a.state.user.clone())
+    };
+    if payload.state.user == own_user {
+        return Err("This device is already part of that account.".into());
+    }
+    Ok(JoinPreview {
+        account_name: payload.state.display_name(),
+        devices: payload.state.certs.len(),
+        own_name,
+        workspaces: workspace_moves(&state)?,
+    })
+}
+
+/// Join another device's account. This device's own certificate is issued
 /// with the received user key; the other devices learn about it on next sync.
+/// Anything this device's old account was part of comes along: the old
+/// account is folded into the new one with a succession record both keys
+/// sign, so its workspaces, memberships, and history read as the new
+/// account's everywhere.
 #[tauri::command]
 pub async fn join_with_code(state: State<'_, AppState>, code: String, passphrase: String) -> CmdResult<AccountView> {
     // Argon2 takes a moment; keep it off the account lock.
@@ -138,14 +202,18 @@ pub async fn join_with_code(state: State<'_, AppState>, code: String, passphrase
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     let user = payload.user_key().map_err(|e| e.to_string())?;
-    let reset = owned_workspaces(&state)?;
+    let moves = workspace_moves(&state)?;
+    // Workspaces nobody else is in just change hands; the rest keep their
+    // records and follow the succession.
+    let reset: Vec<String> = moves.iter().filter(|m| m.kind == "own").map(|m| m.id.clone()).collect();
+    let had_history = !moves.is_empty();
     let joined = with_account(&state, |a, d| {
         let device_id = key_id(&d.verifying_key());
         if payload.state.user == a.state.user {
-            return Err("This device is already linked to that identity.".into());
+            return Err("This device is already part of that account.".into());
         }
         if payload.state.revocations.contains_key(&device_id) {
-            return Err("This device was removed from that identity and can't rejoin it.".into());
+            return Err("This device was removed from that account and can't rejoin it.".into());
         }
         let name = a.state.certs.get(&device_id).map(|c| c.name.clone()).unwrap_or_else(keychain::default_device_name);
         let mut next = payload.state.clone();
@@ -154,11 +222,27 @@ pub async fn join_with_code(state: State<'_, AppState>, code: String, passphrase
             DeviceCert::issue(&user, &d.verifying_key(), &name).map_err(|e| e.to_string())?,
         );
         ensure_box_key(&user, &mut next)?;
-        // Swap keys only once everything else has succeeded.
-        keychain::APP.store(keychain::USER_KEY, &user)?;
+        if had_history || a.state.certs.len() > 1 {
+            let succession = Succession::issue(&a.user, &user).map_err(|e| e.to_string())?;
+            if !next.predecessors.iter().any(|p| p.from == succession.from) {
+                next.predecessors.push(succession);
+            }
+        }
+        // Records first, then the key: if the save fails the keychain still
+        // matches the records on disk, and the join can simply be retried. A
+        // failure between the two leaves records for the new account with the
+        // old key, which open() refuses loudly rather than resetting.
+        let previous = std::mem::replace(&mut a.state, next);
+        if let Err(e) = a.save() {
+            a.state = previous;
+            return Err(e);
+        }
+        if let Err(e) = keychain::APP.store(keychain::USER_KEY, &user) {
+            a.state = previous;
+            let _ = a.save();
+            return Err(e);
+        }
         a.user = user;
-        a.state = next;
-        a.save()?;
         Ok(view(a, d))
     })?;
     // Workspaces this device made under its old identity become the new identity's.
@@ -171,29 +255,28 @@ pub async fn join_with_code(state: State<'_, AppState>, code: String, passphrase
     Ok(joined)
 }
 
-/// Unshared workspaces owned by this device's current identity. Refuses if
-/// it's in any shared workspace: switching identities would orphan the ones it
-/// owns and lose its place in the rest.
-fn owned_workspaces(state: &AppState) -> CmdResult<Vec<String>> {
+/// This device's workspaces, sorted by what linking does to each.
+fn workspace_moves(state: &AppState) -> CmdResult<Vec<WorkspaceMove>> {
     let me = state.account.lock().map_err(|_| "account lock poisoned".to_string())?.state.user.clone();
-    let mut owned = Vec::new();
-    let mut shared = Vec::new();
+    let mut out = Vec::new();
     for w in notes_core::list_workspaces(&state.root).map_err(|e| e.to_string())? {
         let path = state.root.join(&w.id).join("members.json");
-        match notes_core::members::Members::load(&path).map_err(|e| e.to_string())? {
-            Some(m) if m.is_shared() && m.role(&me).is_some_and(|r| r.has_access()) => shared.push(w.name),
-            Some(m) if m.owner == me => owned.push(w.id),
-            _ => {}
-        }
+        let m = notes_core::members::Members::load(&path).map_err(|e| e.to_string())?;
+        let (kind, people) = match m {
+            Some(m) if m.is_owner(&me) && m.is_shared() => {
+                let people = m.people().into_iter().filter(|p| p.role != Role::Owner).map(|p| p.name).collect();
+                ("shared", people)
+            }
+            Some(m) if m.role(&me).is_some_and(|r| r.has_access()) && !m.is_owner(&me) => {
+                let people = m.people().into_iter().filter(|p| !m.same_account(&p.user, &me)).map(|p| p.name).collect();
+                ("member", people)
+            }
+            Some(m) if !m.is_owner(&me) => continue, // removed from someone else's: nothing to carry
+            _ => ("own", Vec::new()),
+        };
+        out.push(WorkspaceMove { id: w.id, name: w.name, kind, people });
     }
-    if !shared.is_empty() {
-        return Err(format!(
-            "This device's identity shares workspaces with other people ({}). Joining another identity would \
-             lose its place in them. Link the other device to this one instead.",
-            shared.join(", ")
-        ));
-    }
-    Ok(owned)
+    Ok(out)
 }
 
 #[tauri::command]
@@ -204,6 +287,11 @@ pub async fn revoke_device(state: State<'_, AppState>, device: String) -> CmdRes
         }
         if !a.state.certs.contains_key(&device) {
             return Err("That device isn't linked.".into());
+        }
+        if a.state.revocations.contains_key(&device) {
+            // Already removed; a second record with a later time would make
+            // devices disagree about which of its changes still count.
+            return Ok(view(a, d));
         }
         let r = Revocation::issue(&a.user, &device).map_err(|e| e.to_string())?;
         a.state.revocations.insert(device, r);

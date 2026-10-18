@@ -82,7 +82,9 @@ fn names(c: &SyncCtx) -> Vec<String> {
     notes_core::list_workspaces(&c.root).unwrap().into_iter().map(|w| w.name).collect()
 }
 
-/// Rename a workspace from this device's copy, the way the app would.
+/// Change the workspace name from this device's copy, logged as an ordinary
+/// edit. Renaming the workspace itself ("workspace.rename") is the owner's
+/// alone; these tests use the name field as a stand-in for any edit.
 fn rename(c: &SyncCtx, id: &str, to: &str) {
     c.open.lock().unwrap().remove(id);
     let mut ws = Workspace::open(&c.root, id).unwrap();
@@ -95,7 +97,7 @@ fn rename(c: &SyncCtx, id: &str, to: &str) {
     m.splice_text(&t, 0, len as isize, to).unwrap();
     m.commit();
     let change = m.get_last_local_change().unwrap().raw_bytes().to_vec();
-    ws.apply_change(&c.device, "manifest", change, "workspace.rename", Some(id)).unwrap();
+    ws.apply_change(&c.device, "manifest", change, "tree.rename", Some(id)).unwrap();
 }
 
 fn name_of(c: &SyncCtx, id: &str) -> String {
@@ -283,6 +285,82 @@ async fn sharing_with_other_people() {
     // Sam's private workspace never left his device.
     assert!(!names(&ca).contains(&"Private".to_string()));
     assert!(!names(&cv).contains(&"Private".to_string()));
+}
+
+/// Alex, an editor in Sam's workspace, links a second computer "the wrong way
+/// round": the computer with the membership joins the fresh account on the
+/// other one. Its old account folds into the new one (a succession record
+/// both keys sign). The fresh computer gets the workspace from its sibling,
+/// Sam sees one Alex rather than two, and the new account's edits count.
+/// Then Sam does the same with his own account: ownership changes hands.
+#[tokio::test(flavor = "multi_thread")]
+async fn linking_folds_one_account_into_another() {
+    use notes_core::identity::Succession;
+    let (sam_key, sam_dev, sam) = person(1, 11, "Sam");
+    let (alex_key, alex_dev, alex) = person(2, 12, "Alex");
+    let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let cs = ctx(dirs[0].path(), &sam_key, &sam_dev, &sam);
+    let ca = ctx(dirs[1].path(), &alex_key, &alex_dev, &alex);
+    let (ep_s, ep_a) = (endpoint(&sam_dev).await, endpoint(&alex_dev).await);
+
+    let mut team = Workspace::create(&cs.root, "team", &manifest("Team").save(), &sam_dev).unwrap();
+    team.ensure_members(&sam).unwrap();
+    let (record, secret) = team.update_members(|m| m.create_invite(&sam_key, "inv", Role::Editor, "", 600_000)).unwrap();
+    drop(team);
+    let join = PendingJoin { invite: record, secret: hex::encode(secret), workspace_name: "Team".into(), owner: sam.clone(), added: now(), last_attempt: None, last_error: None };
+    ca.joins.add(join.clone());
+    sync_with_join(&ca, &ep_a, &cs, &ep_s, Some(join.request())).await.unwrap();
+    assert_eq!(names(&ca), vec!["Team"]);
+    drop(ca);
+
+    // Alex's second computer (device 13) started with a fresh account (key 3)
+    // and made the link code. The old computer joins it: it now signs as
+    // account 3, which carries the succession from account 2.
+    let (alex2_key, alex2_dev, mut alex2) = person(3, 13, "Alex");
+    alex2.predecessors.push(Succession::issue(&alex_key, &alex2_key).unwrap());
+    alex2.certs.insert(key_id(&alex_dev.verifying_key()), DeviceCert::issue(&alex2_key, &alex_dev.verifying_key(), "laptop").unwrap());
+    let ca = ctx(dirs[1].path(), &alex2_key, &alex_dev, &alex2);
+    let mut fresh = alex2.clone();
+    fresh.certs.remove(&key_id(&alex_dev.verifying_key()));
+    let ca2 = ctx(dirs[2].path(), &alex2_key, &alex2_dev, &fresh);
+    let ep_a2 = endpoint(&alex2_dev).await;
+
+    // The two computers are one account now: the fresh one gets Team.
+    let (got, _) = sync(&ca2, &ep_a2, &ca, &ep_a).await.unwrap();
+    assert!(got.new_workspaces, "{got:?}");
+    assert_eq!(names(&ca2), vec!["Team"]);
+    assert_eq!(role_of(&ca2, "team", &alex2.user), Some(Role::Editor), "the editor role follows the succession");
+
+    // Sam has never heard of account 3. On sync it learns the succession,
+    // shares Team with it, and lists one Alex under the new id.
+    rename(&ca2, "team", "Team (Alex, new account)");
+    let (got, sam_got) = sync(&ca2, &ep_a2, &cs, &ep_s).await.unwrap();
+    assert!(sam_got.problems.is_empty(), "{sam_got:?} / {got:?}");
+    assert_eq!(name_of(&cs, "team"), "Team (Alex, new account)");
+    let people = Workspace::open(&cs.root, "team").unwrap().members().unwrap().people();
+    assert_eq!(people.len(), 2, "{people:?}");
+    assert_eq!(people[1].user, alex2.user);
+    assert_eq!(people[1].role, Role::Editor);
+
+    // Sam folds his account into a new one (key 4) the same way. The new
+    // account owns Team: it can change roles, and Alex's copy accepts that.
+    drop(cs);
+    let (sam2_key, _, mut sam2) = person(4, 14, "Sam");
+    sam2.predecessors.push(Succession::issue(&sam_key, &sam2_key).unwrap());
+    sam2.certs.insert(key_id(&sam_dev.verifying_key()), DeviceCert::issue(&sam2_key, &sam_dev.verifying_key(), "laptop").unwrap());
+    let cs = ctx(dirs[0].path(), &sam2_key, &sam_dev, &sam2);
+    {
+        let mut ws = Workspace::open(&cs.root, "team").unwrap();
+        ws.ensure_members(&sam2).unwrap();
+        let m = ws.members().unwrap().clone();
+        assert!(m.is_owner(&sam2.user), "{:?}", m.owner_keys());
+        ws.update_members(|m| m.set_role(&sam2_key, &alex2, Role::Viewer, None)).unwrap();
+    }
+    let (_, alex_got) = sync(&cs, &ep_s, &ca2, &ep_a2).await.unwrap();
+    assert!(alex_got.members_changed.contains("team"), "{alex_got:?}");
+    assert_eq!(role_of(&ca2, "team", &alex2.user), Some(Role::Viewer));
+    let people = Workspace::open(&ca2.root, "team").unwrap().members().unwrap().people();
+    assert_eq!(people[0].user, sam2.user, "the owner shows under the new id: {people:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

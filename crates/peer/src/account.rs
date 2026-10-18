@@ -26,7 +26,21 @@ impl Account {
         let user_id = key_id(&user.verifying_key());
         let mut state = match IdentityState::load(&path).map_err(|e| e.to_string())? {
             Some(s) if s.user == user_id => s,
-            _ => IdentityState::new(&user.verifying_key()),
+            Some(s) => {
+                // The records on disk belong to a different user than the key
+                // in the keychain. Starting over here would silently make this
+                // device a stranger to every shared workspace, so stop instead.
+                return Err(format!(
+                    "The identity records in {} are for account {} but this device's keychain holds the key for {}. \
+                     If the keychain was reset, restore it from a backup, or link this device to one of your others \
+                     again after moving {} aside.",
+                    path.display(),
+                    short(&s.user),
+                    short(&user_id),
+                    path.display()
+                ));
+            }
+            None => IdentityState::new(&user.verifying_key()),
         };
         let device_id = key_id(&device.verifying_key());
         if !state.certs.contains_key(&device_id) {
@@ -51,4 +65,8 @@ pub fn ensure_box_key(user: &SigningKey, state: &mut IdentityState) -> Result<()
         state.box_key = Some(BoxKey::issue(user).map_err(|e| e.to_string())?);
     }
     Ok(())
+}
+
+fn short(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
 }
