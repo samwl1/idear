@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Editor } from "@tiptap/react";
 import { MarkdownEditor, Toolbar } from "./MarkdownEditor";
 import { OutlineRail } from "./OutlineRail";
@@ -37,14 +37,23 @@ export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: 
   const [liveEditor, setLiveEditor] = useState<Editor | null>(null);
   const canEdit = useCanEdit();
   const page = useMemo(() => ({ session, docId: id, pageId: id, onOpen, onError }), [session, id, onOpen, onError]);
+  // Stable, or the editor would hand itself over (and take itself back) on every render.
+  const onEditor = useCallback((e: Editor | null) => {
+    editor.current = e;
+    setLiveEditor(e);
+  }, []);
 
+  // Notes remount on a remote change (the parent keys them by version);
+  // projects stay mounted and follow live, so their header needs the doc
+  // reloaded here when another device changes it.
+  const remoteVersion = session.remoteVersion(id);
   useEffect(() => {
     let live = true;
     session.loadItem(id).then((d) => live && setDoc(d), onError);
     return () => {
       live = false;
     };
-  }, [session, id, onError]);
+  }, [session, id, onError, remoteVersion]);
 
   if (!doc) return <div className="editor-loading" aria-busy="true" />;
 
@@ -101,10 +110,7 @@ export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: 
         initial={(doc as Note).body}
         onOpen={onOpen}
         onError={onError}
-        onEditor={(e) => {
-          editor.current = e;
-          setLiveEditor(e);
-        }}
+        onEditor={onEditor}
       />
     </article>
     <OutlineRail editor={liveEditor} />
@@ -161,6 +167,16 @@ export function ItemHeader({
   const [title, setTitle] = useState(initial.title);
   const [tags, setTags] = useState<string[]>([...initial.tags]);
   const [draftTag, setDraftTag] = useState("");
+  // A rename or tag change from another device arrives as a new `initial`;
+  // follow it unless this device is mid-edit of the same field.
+  const editingTitle = useRef(false);
+  useEffect(() => {
+    if (!editingTitle.current) setTitle(initial.title);
+  }, [initial.title]);
+  const tagKey = initial.tags.join("\n");
+  useEffect(() => {
+    setTags(tagKey ? tagKey.split("\n") : []);
+  }, [tagKey]);
   // A fresh item lands with its title selected, ready to type over.
   const canEdit = useCanEdit();
   const [isFresh] = useState(() => canEdit && initial.title.startsWith("Untitled") && !(initial as Note).body);
@@ -192,23 +208,32 @@ export function ItemHeader({
       {top && <ItemTop session={session} id={id} onError={onError} />}
       <div className="title-row">
       <span className="title-fit" data-aside={aside ? true : undefined}>
-      {aside && (
-        <span className="title-sizer" aria-hidden="true">
-          {title || "Untitled"}
-        </span>
-      )}
-      <input
+      {/* A hidden copy of the text sizes the box, so a long title wraps onto
+          more lines instead of being cut off; the field is laid over it. */}
+      <span className="title-sizer" aria-hidden="true">
+        {title || "Untitled"}
+        {"\u200b"}
+      </span>
+      <textarea
         className="note-title"
-        size={1}
+        rows={1}
         autoFocus={isFresh}
-        onFocus={(e) => isFresh && e.currentTarget.select()}
+        onFocus={(e) => {
+          editingTitle.current = true;
+          if (isFresh) e.currentTarget.select();
+        }}
+        onBlur={() => {
+          editingTitle.current = false;
+        }}
         value={title}
         readOnly={!canEdit}
         placeholder="Untitled"
         aria-label="Title"
         onChange={(e) => {
-          setTitle(e.target.value);
-          saveTitle(e.target.value);
+          // Titles are one line; a pasted newline becomes a space.
+          const v = e.target.value.replace(/[\r\n]+/g, " ");
+          setTitle(v);
+          saveTitle(v);
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") {
