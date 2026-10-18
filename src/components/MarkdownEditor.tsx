@@ -3,7 +3,6 @@ import { NodeSelection } from "@tiptap/pm/state";
 import { Placeholder } from "@tiptap/extensions";
 import { Extension } from "@tiptap/core";
 import { TextSelection } from "@tiptap/pm/state";
-import { TextSelection } from "@tiptap/pm/state";
 import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
@@ -223,6 +222,7 @@ export function MarkdownEditor({
       TableHeader.extend({ content: "paragraph+" }),
       TableCell.extend({ content: "paragraph+" }),
       SlashCommand.configure({ page: page ?? null }),
+      PageLinkSuggestion.configure({ page: page ?? null }),
       TabKey,
       MoveBlock,
       // The slash menu is how blocks get inserted; say so on the empty line the cursor is on.
