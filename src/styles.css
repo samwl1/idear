@@ -4665,10 +4665,24 @@ body[data-resizing] {
 :root[data-width="narrow"] { --note-width: 38rem; }
 :root[data-width="wide"] { --note-width: 64rem; }
 
+/* Compact: rows lose their 30px floor and most of their padding, so the
+   sidebar fits about a third more pages. Whole pixels, like everything else. */
+:root[data-density="compact"] .row,
+:root[data-density="compact"] .nav-item {
+  min-height: 24px;
+}
 :root[data-density="compact"] .row-main,
 :root[data-density="compact"] .nav-item {
-  padding-top: 0.12rem;
-  padding-bottom: 0.12rem;
+  padding-top: 1px;
+  padding-bottom: 1px;
+  line-height: 20px;
+}
+:root[data-density="compact"] .rail-section {
+  padding-top: 0.25rem;
+  padding-bottom: 0.125rem;
+}
+:root[data-density="compact"] .rail-section-head {
+  height: 24px;
 }
 
 :root[data-focus="strong"] :focus-visible {
@@ -7250,12 +7264,18 @@ kbd {
 
 /* Invite form checkboxes and the passphrase shown once. */
 .setting-check {
+  display: flex;
   flex-direction: row;
   align-items: center;
   gap: 0.5rem;
+  cursor: pointer;
 }
 .setting-check input {
   margin: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex: none;
 }
 .invite-pass {
   margin: 0.5rem 0 0;
