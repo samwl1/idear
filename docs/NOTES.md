@@ -23,8 +23,10 @@ attached.
 
 The buttons by a page's title: **pin** it to the sidebar's Pinned section, **print or save it
 as a PDF** (notes; the system print dialog does both, with only the note on the page), and
-**pop out** the page into its own window. A popped-out window shows just that page; edits made
-in any window show up in the others.
+**pop out** the page into its own window. A popped-out window opens on just that page with the
+sidebar tucked away; show it with the sidebar button or Cmd/Ctrl+\ if you want to move around
+from there (that window's choice; the main window keeps its own). Edits made in any window show
+up in the others.
 
 Pins follow your account: a pin made on one of your devices shows on the others, and never on
 the devices of people you share with. Right-click a pin to keep it **on this device only**

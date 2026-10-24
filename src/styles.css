@@ -6306,17 +6306,6 @@ kbd {
   background: var(--ok);
 }
 
-/* A popped-out page: no sidebar, the page fills the window. */
-.app[data-popout] .rail,
-.app[data-popout] .rail-open {
-  display: none;
-}
-
-/* No show-sidebar button here, so no gutter for one. */
-.app[data-popout] .main {
-  padding-left: 0;
-}
-
 /* Narrow windows (pop-outs shrunk down): tighter margins, the top bar's
    controls wrap, and the breadcrumb path shows in full on hover. */
 @media (max-width: 40rem) {
