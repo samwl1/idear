@@ -87,6 +87,12 @@ impl DeviceCert {
         Ok(Self { user: user_id, device: device_id, name: name.to_string(), issued, sig })
     }
 
+    /// The same, for a device known only by its id (re-certifying a folded
+    /// account's devices under the account that took it over).
+    pub fn issue_by_id(user: &SigningKey, device: &str, name: &str) -> Result<Self> {
+        Self::issue(user, &verifying_key(device)?, name)
+    }
+
     pub fn is_valid(&self) -> bool {
         let f = CertFields { user: &self.user, device: &self.device, name: &self.name, issued: self.issued };
         verify(&self.user, "device-cert", &f, &self.sig)
@@ -238,10 +244,13 @@ impl BoxKey {
 
 /// One account folding into another, signed by both: `from` agrees to be
 /// succeeded, `to` agrees to take over. Everything `from` was (owner of a
-/// workspace, editor in another) is read as `to` from then on, and every
-/// change `from`'s devices ever signed stays valid under `from`'s own
-/// certificates. Linking two devices that each have history makes one of
-/// these; either device can be the one that joins.
+/// workspace, editor in another) is read as `to` from then on. `to`
+/// re-certifies `from`'s devices as its own, so every change they ever
+/// signed stays valid, while `from`'s own key stops counting for new
+/// devices: whoever still holds it can't add a device to the account with
+/// it. An account folds into another once; later claims are ignored.
+/// Linking two devices that each have history makes one of these; either
+/// device can be the one that joins.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Succession {
