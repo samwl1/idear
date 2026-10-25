@@ -312,7 +312,7 @@ impl Workspace {
             id: id.to_string(),
             docs: DocStore::open(&dir.join("docs"))?,
             index: Index::open(&dir.join("index.sqlite"))?,
-            log: EventLog::open(&dir.join("events.db"))?,
+            log: EventLog::open(&dir.join("events.db"), id)?,
             members,
             dir,
         })

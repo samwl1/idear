@@ -3,6 +3,10 @@
 //! Every write in the app produces one event. Events form one hash chain per
 //! device (concurrent writers can't share a single linear chain). Each event is
 //! hashed over its canonical fields and signed with the device's Ed25519 key.
+//!
+//! Events name the workspace they were logged in, so one signed in a workspace
+//! can't be replayed into another by someone who is a member of both. Events
+//! from before that field existed carry none and verify as they always did.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,6 +38,10 @@ pub struct Event {
     pub data: String,
     pub hash: String,
     pub sig: String,
+    /// The workspace this was logged in; covered by the hash when present.
+    /// Absent only on events from before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 impl Event {
@@ -61,18 +69,22 @@ struct Canonical<'a> {
     action: &'a str,
     target: &'a str,
     data: &'a str,
+    /// Left out entirely when absent, so older events hash as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<&'a str>,
 }
 
-fn canonical_hash(
-    device: &str,
-    seq: u64,
-    prev: Option<&str>,
-    ts: i64,
-    action: &str,
-    target: &str,
-    data: &str,
-) -> Result<[u8; 32]> {
-    let c = Canonical { device, seq, prev, ts, action, target, data };
+fn canonical_hash(e: &Event) -> Result<[u8; 32]> {
+    let c = Canonical {
+        device: &e.device,
+        seq: e.seq,
+        prev: e.prev.as_deref(),
+        ts: e.ts,
+        action: &e.action,
+        target: &e.target,
+        data: &e.data,
+        workspace: e.workspace.as_deref(),
+    };
     let bytes = serde_json::to_vec(&c)?;
     Ok(Sha256::digest(&bytes).into())
 }
@@ -120,10 +132,11 @@ pub struct VerifyReport {
 
 pub struct EventLog {
     conn: Connection,
+    workspace: String,
 }
 
 impl EventLog {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, workspace: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -147,7 +160,15 @@ impl EventLog {
              CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
                  BEGIN SELECT RAISE(ABORT, 'event log is append-only'); END;",
         )?;
-        Ok(Self { conn })
+        // Logs from before events named their workspace: add the column, left
+        // NULL for the events already there.
+        let has_workspace = conn
+            .prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'workspace'")?
+            .exists([])?;
+        if !has_workspace {
+            conn.execute_batch("ALTER TABLE events ADD COLUMN workspace TEXT")?;
+        }
+        Ok(Self { conn, workspace: workspace.to_string() })
     }
 
     pub fn append(
@@ -174,9 +195,7 @@ impl EventLog {
         };
         let ts = now_ms();
 
-        let digest = canonical_hash(&device, seq, prev.as_deref(), ts, action, target, &data)?;
-        let sig = key.sign(&digest);
-        let event = Event {
+        let mut event = Event {
             device,
             seq,
             prev,
@@ -184,16 +203,20 @@ impl EventLog {
             action: action.to_string(),
             target: target.to_string(),
             data,
-            hash: hex::encode(digest),
-            sig: hex::encode(sig.to_bytes()),
+            hash: String::new(),
+            sig: String::new(),
+            workspace: Some(self.workspace.clone()),
         };
+        let digest = canonical_hash(&event)?;
+        event.hash = hex::encode(digest);
+        event.sig = hex::encode(key.sign(&digest).to_bytes());
 
         tx.execute(
-            "INSERT INTO events (device, seq, prev, ts, action, target, data, hash, sig)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO events (device, seq, prev, ts, action, target, data, hash, sig, workspace)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 event.device, event.seq, event.prev, event.ts, event.action,
-                event.target, event.data, event.hash, event.sig
+                event.target, event.data, event.hash, event.sig, event.workspace
             ],
         )?;
         tx.commit()?;
@@ -210,7 +233,7 @@ impl EventLog {
     /// Every event, oldest first per device. Used for export.
     pub fn all(&self) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(
-            "SELECT device, seq, prev, ts, action, target, data, hash, sig
+            "SELECT device, seq, prev, ts, action, target, data, hash, sig, workspace
              FROM events ORDER BY device, seq",
         )?;
         let rows = stmt.query_map([], row_to_event)?;
@@ -254,12 +277,17 @@ impl EventLog {
                 }
                 None => {}
             }
+            if e.workspace.as_deref().is_some_and(|w| w != self.workspace) {
+                report.rejected += 1;
+                report.problems.push(format!("device {short} event #{} belongs to another workspace", e.seq));
+                continue;
+            }
             if !trusted(&e.device, e.ts, &e.action, &e.doc()) {
                 report.rejected += 1;
                 report.untrusted.insert(e.device.clone());
                 continue;
             }
-            let digest = canonical_hash(&e.device, e.seq, e.prev.as_deref(), e.ts, &e.action, &e.target, &e.data)?;
+            let digest = canonical_hash(e)?;
             let sig_ok = decode_key(&e.device)
                 .and_then(|vk| decode_sig(&e.sig).map(|s| vk.verify(&digest, &s).is_ok()))
                 .unwrap_or(false);
@@ -289,9 +317,9 @@ impl EventLog {
                 continue;
             }
             tx.execute(
-                "INSERT INTO events (device, seq, prev, ts, action, target, data, hash, sig)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![e.device, e.seq, e.prev, e.ts, e.action, e.target, e.data, e.hash, e.sig],
+                "INSERT INTO events (device, seq, prev, ts, action, target, data, hash, sig, workspace)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![e.device, e.seq, e.prev, e.ts, e.action, e.target, e.data, e.hash, e.sig, e.workspace],
             )?;
             report.added += 1;
         }
@@ -336,7 +364,7 @@ impl EventLog {
     /// Newest first.
     pub fn list(&self, limit: u32, offset: u32) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(
-            "SELECT device, seq, prev, ts, action, target, data, hash, sig
+            "SELECT device, seq, prev, ts, action, target, data, hash, sig, workspace
              FROM events ORDER BY ts DESC, device, seq DESC LIMIT ?1 OFFSET ?2",
         )?;
         let rows = stmt.query_map(params![limit, offset], row_to_event)?;
@@ -347,7 +375,7 @@ impl EventLog {
     /// device's chain is contiguous and correctly linked.
     pub fn verify(&self) -> Result<VerifyReport> {
         let mut stmt = self.conn.prepare(
-            "SELECT device, seq, prev, ts, action, target, data, hash, sig
+            "SELECT device, seq, prev, ts, action, target, data, hash, sig, workspace
              FROM events ORDER BY device, seq",
         )?;
         let events: Vec<Event> = stmt
@@ -378,9 +406,10 @@ impl EventLog {
                 if e.prev.as_deref() != expected_prev {
                     problems.push(format!("device {short} seq {}: broken link to previous event", e.seq));
                 }
-                let digest = canonical_hash(
-                    &e.device, e.seq, e.prev.as_deref(), e.ts, &e.action, &e.target, &e.data,
-                )?;
+                if e.workspace.as_deref().is_some_and(|w| w != self.workspace) {
+                    problems.push(format!("device {short} seq {}: logged in another workspace", e.seq));
+                }
+                let digest = canonical_hash(e)?;
                 if hex::encode(digest) != e.hash {
                     problems.push(format!("device {short} seq {}: hash mismatch (event altered)", e.seq));
                 }
@@ -417,6 +446,7 @@ fn row_to_event(r: &rusqlite::Row) -> rusqlite::Result<Event> {
         data: r.get(6)?,
         hash: r.get(7)?,
         sig: r.get(8)?,
+        workspace: r.get(9)?,
     })
 }
 
@@ -434,4 +464,102 @@ fn decode_sig(hex_str: &str) -> Result<Signature> {
         .try_into()
         .map_err(|_| CoreError::Invalid("signature length".into()))?;
     Ok(Signature::from_bytes(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn open(dir: &Path, ws: &str) -> EventLog {
+        EventLog::open(&dir.join(format!("{ws}.db")), ws).unwrap()
+    }
+
+    #[test]
+    fn events_stay_in_the_workspace_they_were_logged_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = key(7);
+        let mut a = open(dir.path(), "w1");
+        a.append(&k, "note.edit", "n", &serde_json::json!({ "doc": "n", "change": "abc" })).unwrap();
+        let events = a.all().unwrap();
+        assert_eq!(events[0].workspace.as_deref(), Some("w1"));
+        assert!(a.verify().unwrap().ok);
+
+        // The same signed event offered to another workspace is refused,
+        // even though its signature is fine and the device would be trusted.
+        let mut b = open(dir.path(), "w2");
+        let r = b.import(&events, &|_, _, _, _| true).unwrap();
+        assert_eq!((r.added, r.rejected), (0, 1), "{r:?}");
+        assert!(r.problems[0].contains("another workspace"), "{r:?}");
+        assert!(b.all().unwrap().is_empty());
+
+        // And at home it imports as a duplicate without complaint.
+        let r = a.import(&events, &|_, _, _, _| true).unwrap();
+        assert_eq!((r.added, r.rejected), (0, 0));
+    }
+
+    #[test]
+    fn events_from_before_the_workspace_field_still_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = key(9);
+        let device = hex::encode(k.verifying_key().to_bytes());
+        // Hand-build an event the way older versions did: no workspace field.
+        let mut e = Event {
+            device,
+            seq: 1,
+            prev: None,
+            ts: 1,
+            action: "note.edit".into(),
+            target: "n".into(),
+            data: "{}".into(),
+            hash: String::new(),
+            sig: String::new(),
+            workspace: None,
+        };
+        let digest = canonical_hash(&e).unwrap();
+        e.hash = hex::encode(digest);
+        e.sig = hex::encode(k.sign(&digest).to_bytes());
+        // Its hash is exactly the pre-workspace one: the field adds nothing when absent.
+        #[derive(Serialize)]
+        struct Old<'a> {
+            device: &'a str,
+            seq: u64,
+            prev: Option<&'a str>,
+            ts: i64,
+            action: &'a str,
+            target: &'a str,
+            data: &'a str,
+        }
+        let old = Old { device: &e.device, seq: 1, prev: None, ts: 1, action: "note.edit", target: "n", data: "{}" };
+        let legacy = Sha256::digest(serde_json::to_vec(&old).unwrap());
+        assert_eq!(e.hash, hex::encode(legacy));
+
+        let mut log = open(dir.path(), "w1");
+        let r = log.import(&[e], &|_, _, _, _| true).unwrap();
+        assert_eq!((r.added, r.rejected), (1, 0), "{r:?}");
+        assert!(log.verify().unwrap().ok);
+    }
+
+    #[test]
+    fn a_bad_device_id_is_refused_not_panicked_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = open(dir.path(), "w1");
+        let e = Event {
+            device: "ééééé".into(),
+            seq: 1,
+            prev: None,
+            ts: 1,
+            action: "note.edit".into(),
+            target: "n".into(),
+            data: "{}".into(),
+            hash: "00".into(),
+            sig: "00".into(),
+            workspace: None,
+        };
+        let r = log.import(&[e], &|_, _, _, _| true).unwrap();
+        assert_eq!((r.added, r.rejected), (0, 1));
+    }
 }
