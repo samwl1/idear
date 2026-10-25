@@ -49,6 +49,11 @@ src/                React frontend
   each user key to the account it ended up in (`Members::canon`), so the old key's roles,
   ownership, and signed records keep counting. A workspace's `owner` field stays the original
   key; `current_owner()` follows the chain, and records are valid under any key in it.
+  The joining device re-certifies the old account's devices under the new key, and from then on
+  the old key adds nothing: a superseded identity takes no new certificates or addresses from
+  anyone (only revocations), so whoever still holds that key can't put a device on the account
+  with it. An account folds into another once; a succession that disagrees with one already
+  known is ignored.
 
 
 ## Update files
@@ -65,11 +70,14 @@ from another device.
   passphrase when it opens one. What's inside is still checked change by change, so the
   passphrase only controls who can read the file, never what counts.
 - **Private docs** (pins) go only in files for your own devices.
-- The header (format version and identities) is authenticated.
+- The header (format version and identities) is authenticated, in passphrase files too.
 - On import, every event must verify, come from a device allowed to change that workspace at the
-  time (see [Sharing](SHARING.md#how-it-works)), and extend that device's history exactly.
-  Every Automerge change must be vouched for by such an event; changes that aren't, and anything
-  built on them, are skipped and reported.
+  time (see [Sharing](SHARING.md#how-it-works)), name this workspace (events carry the id of the
+  workspace they were logged in inside the signed fields, so one can't be replayed into another;
+  events from before that field existed have none), and extend that device's history exactly.
+  Every Automerge change must be vouched for by such an event about the same doc; changes that
+  aren't, and anything built on them, are skipped and reported. A layout change that alters the
+  workspace's name is only taken from a creation or rename event, which only the owner can log.
 - Files carry whole workspaces, so they can be imported in any order, more than once, or after
   skipping one, without leaving gaps.
 
@@ -132,8 +140,9 @@ belong to each device and live in the app's local storage.
 
 - **Removing a device doesn't rotate your identity.** A removed device's own key is refused,
   but every linked device holds the user key, so a stolen device could certify a new key for
-  itself. Real recovery from a lost device needs an identity rotation (new user key, re-link the
-  remaining devices), which isn't built yet.
+  itself. The way out today is linking: remove the lost device, then add a remaining device to a
+  fresh account made on a clean one. The old account folds into the new one, and the old key
+  can't add devices to it any more (see Linking either way). There's no one-step "rotate" yet.
 
 - No encryption at rest yet (planned: SQLCipher plus encrypted doc files, key in keychain).
 - A locked or missing keyring stops the app at launch with an error instead of a UI prompt.
