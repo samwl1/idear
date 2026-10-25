@@ -152,8 +152,8 @@ export function AppearanceSettings() {
               label="Note alignment"
               value={p.align}
               options={[
-                { value: "center", label: "Centered" },
                 { value: "left", label: "Left" },
+                { value: "center", label: "Centered" },
               ]}
               onChange={(align) => setPrefs({ align })}
             />

@@ -100,7 +100,7 @@ function rows(q: any) {
   return out;
 }
 
-const me = { userId: "u-sam", name: "Sam", thisDevice: "dev-1", devices: [{ id: "dev-1", name: "MacBook", linked: Date.now() - 86400000 * 30, revoked: null, thisDevice: true }] };
+const me = { userId: "u-sam", name: "Sam", thisDevice: "dev-1", devices: [{ id: "dev-1", name: "MacBook", linked: Date.now() - 86400000 * 30, revoked: null, thisDevice: true }], mergedIn: [], mergedInto: null };
 
 async function invoke(cmd: string, args: any = {}): Promise<any> {
   switch (cmd) {
@@ -117,6 +117,8 @@ async function invoke(cmd: string, args: any = {}): Promise<any> {
     case "list_events": return [];
     case "list_trash": return [];
     case "list_joins": return [];
+    case "list_approvals": return [];
+    case "share_contacts": return [];
     case "git_info": return { isRepo: true, remote: "git@github.com:sam/idear.git", branch: "main" };
     case "path_exists": return String(args.path).includes("sam");
     case "git_branches": return { branches: ["main", "relay-on-pi", "sqlcipher", "feature/pi"], source: args.path ? "local" : "remote", error: null };
