@@ -10,6 +10,27 @@ pub mod sync;
 
 use std::path::Path;
 
+/// Create a data folder (and its `workspaces`) readable by this user alone.
+/// It holds identity records, pending invite secrets, and every workspace in
+/// the clear, and the platform's data directory isn't always private (on
+/// Linux `~/.local/share` is often world-readable). An existing folder is
+/// tightened the same way. Does nothing about modes on Windows.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir.join("workspaces"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for d in [dir, &dir.join("workspaces")] {
+            let mut perms = std::fs::metadata(d)?.permissions();
+            if perms.mode() & 0o077 != 0 {
+                perms.set_mode(0o700);
+                std::fs::set_permissions(d, perms)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether a data folder holds any workspaces.
 fn has_workspaces(dir: &Path) -> bool {
     std::fs::read_dir(dir.join("workspaces")).is_ok_and(|mut d| d.next().is_some())

@@ -288,7 +288,22 @@ impl Members {
         self.records.retain(|r| r.is_valid_any(&ws, &owners));
         self.invites.retain(|id, i| &i.id == id && i.is_valid_any(&ws, &owners));
         self.sort();
+        self.prune_identities();
         self
+    }
+
+    /// Drop identities of accounts that were never part of the workspace.
+    /// Anyone's copy can name any number of them; only those with a role
+    /// (past or present), or folded into one that has, are worth keeping and
+    /// consulting on every check.
+    fn prune_identities(&mut self) {
+        let keep: Vec<String> = self
+            .identities
+            .values()
+            .filter(|ids| self.role(&ids.user).is_some() || ids.predecessors.iter().any(|p| self.role(&p.from).is_some()))
+            .map(|ids| ids.user.clone())
+            .collect();
+        self.identities.retain(|u, _| keep.contains(u));
     }
 
     // ---- successions ----------------------------------------------------------------
@@ -405,6 +420,7 @@ impl Members {
             }
         }
         self.sort();
+        self.prune_identities();
         Ok(*self != before)
     }
 
@@ -619,12 +635,23 @@ impl Members {
         out
     }
 
+    /// What a stranger is told when an invite is unknown or its secret is
+    /// wrong: the same thing either way, so guessing ids learns nothing.
+    pub const BAD_INVITE: &str = "That invite link isn't valid.";
+
     /// Check an invite presented by someone who wants to join.
     pub fn check_invite(&self, id: &str, secret: &[u8], now: i64) -> Result<&InviteRecord> {
-        let invite = self.invites.get(id).ok_or_else(|| CoreError::Invalid("That invite doesn't exist.".into()))?;
+        let invite = self.invites.get(id).ok_or_else(|| CoreError::Invalid(Self::BAD_INVITE.into()))?;
         if invite.secret_hash != hash_secret(secret) {
-            return Err(CoreError::Invalid("That invite's secret doesn't match.".into()));
+            return Err(CoreError::Invalid(Self::BAD_INVITE.into()));
         }
+        self.check_invite_open(id, now)
+    }
+
+    /// Whether an invite can still be redeemed, secret aside: for deciding on
+    /// a request that was checked (secret and all) when it was held.
+    pub fn check_invite_open(&self, id: &str, now: i64) -> Result<&InviteRecord> {
+        let invite = self.invites.get(id).ok_or_else(|| CoreError::Invalid(Self::BAD_INVITE.into()))?;
         if invite.cancelled {
             return Err(CoreError::Invalid("That invite was cancelled.".into()));
         }

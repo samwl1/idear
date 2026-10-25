@@ -624,12 +624,14 @@ impl SyncCtx {
                     let me = effective.role(&own.user).is_some_and(Role::has_access);
                     // A workspace new to this device only comes from its owner, for an invite we redeemed.
                     // The join may not know its workspace yet (short links don't
-                    // say); the owner named in the link is what matters.
-                    let invited = self
-                        .joins
-                        .list()
-                        .iter()
-                        .any(|j| j.owner.user == ids.user && (j.workspace == s.summary.id || j.workspace.is_empty()));
+                    // say); then it has to be the one whose membership shows this
+                    // invite redeemed by us, not just any the owner sends.
+                    let invited = self.joins.list().iter().any(|j| {
+                        j.owner.user == ids.user
+                            && (j.workspace == s.summary.id
+                                || (j.workspace.is_empty()
+                                    && effective.invite_used_by(&j.invite_id).is_some_and(|r| r.user == own.user)))
+                    });
                     they && me && (known || (invited && effective.is_owner(&ids.user)))
                 }
             };
@@ -758,16 +760,21 @@ impl SyncCtx {
         let user_key = self.user_key()?;
         let secret = hex::decode(&req.secret).map_err(|_| "That invite link is damaged.".to_string())?;
         let mut open = self.open.lock().map_err(|_| "workspace lock poisoned")?;
-        let workspace = if req.workspace.is_empty() { self.workspace_of_invite(&mut open, &req.invite)? } else { req.workspace.clone() };
+        // Unknown invite or workspace: the same answer as a wrong secret, so
+        // a stranger can't tell which ids exist.
+        let workspace = if req.workspace.is_empty() {
+            self.workspace_of_invite(&mut open, &req.invite).map_err(|_| Members::BAD_INVITE.to_string())?
+        } else {
+            req.workspace.clone()
+        };
         if !open.contains_key(&workspace) {
-            let ws = Workspace::open(&self.root, &workspace)
-                .map_err(|_| "This workspace no longer exists on the owner's device.".to_string())?;
+            let ws = Workspace::open(&self.root, &workspace).map_err(|_| Members::BAD_INVITE.to_string())?;
             open.insert(workspace.clone(), ws);
         }
         let ws = open.get_mut(&workspace).expect("opened");
         let m = ws.ensure_members(&own).map_err(err)?.clone();
         if !m.is_owner(&own.user) {
-            return Err("This device doesn't own that workspace.".into());
+            return Err(Members::BAD_INVITE.into());
         }
         // Already redeemed by this person (e.g. a retry after a dropped connection): fine.
         if m.invite_used_by(&req.invite).is_some_and(|r| r.user == theirs.user) {
@@ -832,6 +839,13 @@ impl SyncCtx {
         if m.invite_used_by(invite).is_some_and(|r| r.user == user) || m.role(user).is_some_and(Role::has_access) {
             self.approvals.remove(invite, user);
             return Ok(());
+        }
+        // The request was checked when it was held, but the invite may have
+        // expired, been cancelled, or been used by someone else since; a
+        // single-use link admits one person however many asked.
+        if let Err(e) = m.check_invite_open(invite, now()) {
+            self.approvals.remove(invite, user);
+            return Err(err(e));
         }
         let record = ws.update_members(|mm| mm.set_role(&user_key, &a.identity, a.role, Some(invite))).map_err(err)?;
         ws.log_event(&self.device, "member.add", user, serde_json::json!({ "name": record.name, "role": a.role.as_str(), "invite": invite }))

@@ -81,7 +81,7 @@ impl Peer {
 
     /// Open with keys from somewhere other than the keychain (tests).
     pub fn with_keys(dir: &Path, device: SigningKey, user: SigningKey) -> Res<Self> {
-        std::fs::create_dir_all(dir.join("workspaces")).map_err(err)?;
+        notes_peer::create_private_dir(dir).map_err(err)?;
         let lock = File::create(dir.join("lock")).map_err(err)?;
         if lock.try_lock().is_err() {
             return Err(format!("{BUSY} {}. Only one can run at a time; close the other first.", dir.display()));

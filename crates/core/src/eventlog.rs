@@ -104,6 +104,10 @@ pub struct ImportedEvents {
 #[derive(Debug, Default)]
 pub struct Attested {
     hashes: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Layout changes vouched for by an event only the owner may log
+    /// (`workspace.create`, `workspace.rename`): the ones allowed to set the
+    /// workspace's name.
+    renames: std::collections::HashSet<String>,
     pub workspace_created: bool,
     /// The creation event listed no heads: a workspace from before creation
     /// events vouched for the first layout change.
@@ -114,6 +118,11 @@ impl Attested {
     /// Whether a trusted event about `doc` vouches for change `hash`.
     pub fn vouches(&self, doc: &str, hash: &str) -> bool {
         self.hashes.get(doc).is_some_and(|h| h.contains(hash))
+    }
+
+    /// Whether an owner-only event (creation or rename) vouches for layout change `hash`.
+    pub fn allows_rename(&self, hash: &str) -> bool {
+        self.renames.contains(hash)
     }
 
     fn add(&mut self, doc: &str, hash: &str) {
@@ -343,12 +352,19 @@ impl EventLog {
                 continue;
             }
             let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) else { continue };
+            let owner_only = e.action == "workspace.create" || crate::members::owner_only(&e.action);
             if let Some(h) = data.get("change").and_then(|v| v.as_str()) {
                 out.add(&doc, h);
+                if owner_only {
+                    out.renames.insert(h.to_string());
+                }
             }
             if let Some(hs) = data.get("heads").and_then(|v| v.as_array()) {
                 for h in hs.iter().filter_map(|v| v.as_str()) {
                     out.add(&doc, h);
+                    if owner_only {
+                        out.renames.insert(h.to_string());
+                    }
                 }
             }
             if e.action == "workspace.create" {

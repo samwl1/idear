@@ -413,8 +413,10 @@ pub async fn git_info(path: String) -> CmdResult<GitInfo> {
 }
 
 #[tauri::command]
+/// Whether a folder exists. Only folders: this is for linked repositories,
+/// and shouldn't double as a way to probe for files.
 pub async fn path_exists(path: String) -> CmdResult<bool> {
-    Ok(PathBuf::from(path).exists())
+    Ok(PathBuf::from(path).is_dir())
 }
 
 #[derive(Serialize)]

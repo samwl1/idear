@@ -516,6 +516,13 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
 /// Seal `plain` under a passphrase: Argon2id key, XChaCha20-Poly1305.
 /// Output is salt (16) + nonce (24) + ciphertext.
 pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    seal_with_passphrase_bound(plain, passphrase, &[])
+}
+
+/// `seal_with_passphrase` with `aad` bound to the ciphertext: anything kept
+/// in the clear next to it (a file header) that must not be swapped.
+pub fn seal_with_passphrase_bound(plain: &[u8], passphrase: &str, aad: &[u8]) -> Result<Vec<u8>> {
+    use chacha20poly1305::aead::Payload;
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 24];
     getrandom::getrandom(&mut salt).map_err(|e| CoreError::Invalid(e.to_string()))?;
@@ -523,7 +530,7 @@ pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     let key = derive_key(passphrase, &salt)?;
     let cipher = XChaCha20Poly1305::new(key.as_ref().into());
     let sealed = cipher
-        .encrypt(XNonce::from_slice(&nonce), plain)
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad })
         .map_err(|_| CoreError::Invalid("encryption failed".into()))?;
     let mut out = Vec::with_capacity(16 + 24 + sealed.len());
     out.extend_from_slice(&salt);
@@ -534,6 +541,12 @@ pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
 
 /// The inverse of `seal_with_passphrase`. `what` names the thing for the error.
 pub fn open_with_passphrase(bytes: &[u8], passphrase: &str, what: &str) -> Result<Zeroizing<Vec<u8>>> {
+    open_with_passphrase_bound(bytes, passphrase, what, &[])
+}
+
+/// The inverse of `seal_with_passphrase_bound`.
+pub fn open_with_passphrase_bound(bytes: &[u8], passphrase: &str, what: &str, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    use chacha20poly1305::aead::Payload;
     if bytes.len() < 16 + 24 + 16 {
         return Err(CoreError::Invalid(format!("The {what} is damaged or incomplete.")));
     }
@@ -542,7 +555,7 @@ pub fn open_with_passphrase(bytes: &[u8], passphrase: &str, what: &str) -> Resul
     let key = derive_key(passphrase, salt)?;
     Ok(Zeroizing::new(
         XChaCha20Poly1305::new(key.as_ref().into())
-            .decrypt(XNonce::from_slice(nonce), sealed)
+            .decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad })
             .map_err(|_| CoreError::Invalid(format!("Wrong passphrase, or the {what} was changed.")))?,
     ))
 }

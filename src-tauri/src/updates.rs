@@ -14,6 +14,27 @@ use crate::commands::{AppState, CmdResult};
 /// per-message limit; files had none.
 const IMPORT_LIMIT: u64 = 512 * 1024 * 1024;
 
+/// File extensions update files are written and read under (the dialog's filter).
+const EXTENSIONS: &[&str] = &["idear", "scramble", "notesupdate"];
+
+/// An update-file path the frontend chose: it has to look like one (the
+/// extension the save dialog offers) and lie outside the app's own data,
+/// so a webview talked into calling these can't read or overwrite anything
+/// else on disk.
+fn update_path(state: &AppState, path: &str) -> CmdResult<PathBuf> {
+    let p = PathBuf::from(path);
+    let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+    if !p.is_absolute() || !ext.is_some_and(|e| EXTENSIONS.contains(&e.as_str())) {
+        return Err("Update files end in .idear.".into());
+    }
+    let root = state.root.canonicalize().unwrap_or_else(|_| state.root.clone());
+    let parent = p.parent().and_then(|d| d.canonicalize().ok()).unwrap_or_else(|| p.clone());
+    if parent.starts_with(&root) {
+        return Err("Update files can't be kept inside the app's own data folder.".into());
+    }
+    Ok(p)
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportView {
@@ -49,7 +70,7 @@ pub async fn export_update(
         }
         Err(e) => return Err(e),
     };
-    let path = PathBuf::from(path);
+    let path = update_path(&state, &path)?;
     let user = state.account.lock().map_err(|_| "account lock poisoned")?.user.clone();
     let mut phrase = None;
     if passphrase == Some(true) {
@@ -69,7 +90,8 @@ pub async fn export_update(
 
 /// Whether an update file needs a passphrase to open.
 #[tauri::command]
-pub async fn inspect_update(path: String) -> CmdResult<bool> {
+pub async fn inspect_update(state: State<'_, AppState>, path: String) -> CmdResult<bool> {
+    let path = update_path(&state, &path)?;
     let mut head = [0u8; 16];
     let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
     use std::io::Read;
@@ -90,7 +112,7 @@ pub struct ImportView {
 #[tauri::command]
 pub async fn import_update(state: State<'_, AppState>, path: String, passphrase: Option<String>) -> CmdResult<ImportView> {
     let user = state.account.lock().map_err(|_| "account lock poisoned")?.user.clone();
-    let path = PathBuf::from(path);
+    let path = update_path(&state, &path)?;
     let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
     if size > IMPORT_LIMIT {
         return Err(format!(
