@@ -117,7 +117,13 @@ struct RevokeFields<'a> {
 
 impl Revocation {
     pub fn issue(user: &SigningKey, device: &str) -> Result<Self> {
-        let (user_id, revoked) = (key_id(&user.verifying_key()), now_ms());
+        Self::issue_at(user, device, now_ms())
+    }
+
+    /// A revocation dated `revoked`: for carrying one over to the account
+    /// that took this one over, keeping where the device's history ends.
+    pub fn issue_at(user: &SigningKey, device: &str, revoked: i64) -> Result<Self> {
+        let user_id = key_id(&user.verifying_key());
         let sig = sign(user, "revocation", &RevokeFields { user: &user_id, device, revoked })?;
         Ok(Self { user: user_id, device: device.to_string(), revoked, sig })
     }

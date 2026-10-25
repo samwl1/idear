@@ -21,10 +21,14 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         for d in [dir, &dir.join("workspaces")] {
-            let mut perms = std::fs::metadata(d)?.permissions();
+            let Ok(mut perms) = std::fs::metadata(d).map(|m| m.permissions()) else { continue };
             if perms.mode() & 0o077 != 0 {
                 perms.set_mode(0o700);
-                std::fs::set_permissions(d, perms)?;
+                // Some filesystems (FAT, a few network mounts) report modes
+                // they won't change; that's no reason not to start.
+                if let Err(e) = std::fs::set_permissions(d, perms) {
+                    eprintln!("Couldn't make {} private: {e}", d.display());
+                }
             }
         }
     }

@@ -947,6 +947,39 @@ mod sharing {
     }
 
     #[test]
+    fn only_the_owner_creates_or_renames_a_workspace() {
+        // An editor forges a "workspace.create" event whose heads name a
+        // change that renames the workspace. Creation vouches for a name, so
+        // it must be the owner's alone, like renaming.
+        let (owner, od, oid) = person(1, 11, "Sam");
+        let (_, xd, xid) = person(2, 12, "Alex");
+        let (ro, rx) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut ws = Workspace::create(ro.path(), "w", &manifest().save(), &od).unwrap();
+        ws.ensure_members(&oid).unwrap();
+        ws.update_members(|m| m.set_role(&owner, &xid, Role::Editor, None)).unwrap();
+        drop(ws);
+        assert!(send(ro.path(), rx.path(), &xid, &xd).created);
+
+        let mut theirs = Workspace::open(rx.path(), "w").unwrap();
+        let mut m = AutoCommit::load(&theirs.load_doc("manifest").unwrap()).unwrap();
+        let t = match m.get(ROOT, "name").unwrap() { Some((_, id)) => id, None => panic!() };
+        m.splice_text(&t, 0, 4, "Pwned").unwrap();
+        m.commit();
+        let change = m.get_last_local_change().unwrap();
+        let hash = change.hash().to_string();
+        theirs
+            .docs
+            .import_changes("manifest", vec![automerge::Change::from_bytes(change.raw_bytes().to_vec()).unwrap()], |_, _| true)
+            .unwrap();
+        theirs.log_event(&xd, "workspace.create", "w", serde_json::json!({ "name": "Pwned", "heads": [hash] })).unwrap();
+        drop(theirs);
+
+        let r = send(rx.path(), ro.path(), &oid, &od);
+        assert!(r.untrusted.contains(&key_id(&xd.verifying_key())), "{r:?}");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
+    }
+
+    #[test]
     fn a_copy_with_another_owner_is_refused() {
         let (_, od, oid) = person(1, 11, "Sam");
         let (_, xd, xid) = person(2, 12, "Alex");

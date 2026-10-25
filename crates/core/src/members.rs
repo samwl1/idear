@@ -197,8 +197,11 @@ impl InviteRecord {
 
 /// Actions only the workspace's owner may take, however they arrive: renaming
 /// the workspace. Editors can change everything inside it, not what it's called.
+/// Actions only the owner's devices may log. Creation vouches for the first
+/// layout and its name, and marks older workspaces' first import; renaming
+/// is the owner's alone. Anyone else logging either is refused.
 pub fn owner_only(action: &str) -> bool {
-    action == "workspace.rename"
+    action == "workspace.rename" || action == "workspace.create"
 }
 
 pub fn hash_secret(secret: &[u8]) -> String {
@@ -446,6 +449,7 @@ impl Members {
                 let mut frozen = cur.clone();
                 frozen.revocations = ids.revocations.clone();
                 frozen.successors = ids.successors.clone();
+                frozen.predecessors = ids.predecessors.clone();
                 cur.merge(&frozen)
             }
             Some(cur) => cur.merge(&ids),
@@ -525,8 +529,7 @@ impl Members {
                 && self.device_users(device, own).any(|ids| {
                     ids.trusted_at(device, ts)
                         && self.role(&ids.user).is_some_and(Role::has_access)
-                        && (crate::workspace::private_doc_id(&ids.user) == doc
-                            || ids.predecessors.iter().any(|p| crate::workspace::private_doc_id(&p.from) == doc))
+                        && self.owns_private_doc(&ids.user, doc)
                 });
         }
         // Shared docs are never touched through private.* events, and
@@ -539,6 +542,16 @@ impl Members {
                 && self.could_edit_at(&ids.user, ts)
                 && (!owner_only(action) || self.is_owner(&ids.user))
         })
+    }
+
+    /// Whether private doc `doc` is `user`'s: named after their key, or after
+    /// the key of any account folded into theirs (pins made before linking).
+    fn owns_private_doc(&self, user: &str, doc: &str) -> bool {
+        crate::workspace::private_doc_id(user) == doc
+            || self
+                .identities
+                .keys()
+                .any(|u| crate::workspace::private_doc_id(u) == doc && self.same_account(u, user))
     }
 
     /// Whether a device may sync this workspace right now: it belongs to

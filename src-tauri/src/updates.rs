@@ -18,18 +18,23 @@ const IMPORT_LIMIT: u64 = 512 * 1024 * 1024;
 const EXTENSIONS: &[&str] = &["idear", "scramble", "notesupdate"];
 
 /// An update-file path the frontend chose: it has to look like one (the
-/// extension the save dialog offers) and lie outside the app's own data,
-/// so a webview talked into calling these can't read or overwrite anything
-/// else on disk.
+/// extension the save dialog offers), be a plain file rather than a link,
+/// and lie outside the app's own data folder, so a webview talked into
+/// calling these can't read or overwrite anything else on disk.
 fn update_path(state: &AppState, path: &str) -> CmdResult<PathBuf> {
     let p = PathBuf::from(path);
     let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
     if !p.is_absolute() || !ext.is_some_and(|e| EXTENSIONS.contains(&e.as_str())) {
         return Err("Update files end in .idear.".into());
     }
-    let root = state.root.canonicalize().unwrap_or_else(|_| state.root.clone());
+    if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("That path is a link, not a file.".into());
+    }
+    // The data folder holds `workspaces/`, identity records, and pending joins.
+    let data = state.root.parent().unwrap_or(&state.root);
+    let data = data.canonicalize().unwrap_or_else(|_| data.to_path_buf());
     let parent = p.parent().and_then(|d| d.canonicalize().ok()).unwrap_or_else(|| p.clone());
-    if parent.starts_with(&root) {
+    if parent.starts_with(&data) {
         return Err("Update files can't be kept inside the app's own data folder.".into());
     }
     Ok(p)
