@@ -15,6 +15,12 @@ use sha2::{Digest, Sha256};
 use crate::error::{CoreError, Result};
 use crate::now_ms;
 
+/// Whether a device may log an action at a time: `(device, ts, action, doc)`,
+/// where `doc` is the doc the event is about (`""` for events about nothing
+/// in particular, such as membership changes). Decided by the workspace's
+/// membership; the log itself only checks signatures and chains.
+pub type Trusted<'a> = dyn Fn(&str, i64, &str, &str) -> bool + 'a;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
@@ -28,6 +34,21 @@ pub struct Event {
     pub data: String,
     pub hash: String,
     pub sig: String,
+}
+
+impl Event {
+    /// The doc this event is about: `data.doc`, or the manifest for the
+    /// workspace's creation event. Empty for events about nothing in
+    /// particular (membership, invites).
+    pub fn doc(&self) -> String {
+        if self.action == "workspace.create" {
+            return crate::workspace::MANIFEST.to_string();
+        }
+        serde_json::from_str::<serde_json::Value>(&self.data)
+            .ok()
+            .and_then(|d| d.get("doc").and_then(|v| v.as_str()).map(str::to_string))
+            .unwrap_or_default()
+    }
 }
 
 /// The fields covered by the hash. Field order here is the canonical order.
@@ -65,13 +86,27 @@ pub struct ImportedEvents {
     pub problems: Vec<String>,
 }
 
+/// Which Automerge changes signed events vouch for, per doc. A hash only
+/// counts for the doc the event names: an event about one doc (a member's
+/// private pins, say) can never let a change into another (the layout).
 #[derive(Debug, Default)]
 pub struct Attested {
-    pub hashes: std::collections::HashSet<String>,
+    hashes: std::collections::HashMap<String, std::collections::HashSet<String>>,
     pub workspace_created: bool,
     /// The creation event listed no heads: a workspace from before creation
     /// events vouched for the first layout change.
     pub legacy_create: bool,
+}
+
+impl Attested {
+    /// Whether a trusted event about `doc` vouches for change `hash`.
+    pub fn vouches(&self, doc: &str, hash: &str) -> bool {
+        self.hashes.get(doc).is_some_and(|h| h.contains(hash))
+    }
+
+    fn add(&mut self, doc: &str, hash: &str) {
+        self.hashes.entry(doc.to_string()).or_default().insert(hash.to_string());
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,13 +221,20 @@ impl EventLog {
     /// must hash and verify, come from a device `trusted` accepts, and extend
     /// that device's chain exactly. Duplicates are skipped; anything else is
     /// refused and reported.
-    pub fn import(&mut self, incoming: &[Event], trusted: impl Fn(&str, i64, &str) -> bool) -> Result<ImportedEvents> {
+    pub fn import(&mut self, incoming: &[Event], trusted: &Trusted) -> Result<ImportedEvents> {
         let mut report = ImportedEvents::default();
         let mut sorted: Vec<&Event> = incoming.iter().collect();
         sorted.sort_by(|a, b| (a.device.as_str(), a.seq).cmp(&(b.device.as_str(), b.seq)));
         let tx = self.conn.transaction()?;
         for e in sorted {
-            let short = &e.device[..e.device.len().min(8)];
+            // Device ids are hex public keys; anything else is refused before
+            // it's looked at further (and never sliced, which could panic).
+            if decode_key(&e.device).is_err() {
+                report.rejected += 1;
+                report.problems.push("an event named a device that isn't a valid key".into());
+                continue;
+            }
+            let short = short_id(&e.device);
             let existing: Option<String> = tx
                 .query_row(
                     "SELECT hash FROM events WHERE device = ?1 AND seq = ?2",
@@ -212,7 +254,7 @@ impl EventLog {
                 }
                 None => {}
             }
-            if !trusted(&e.device, e.ts, &e.action) {
+            if !trusted(&e.device, e.ts, &e.action, &e.doc()) {
                 report.rejected += 1;
                 report.untrusted.insert(e.device.clone());
                 continue;
@@ -258,19 +300,28 @@ impl EventLog {
     }
 
     /// Automerge change hashes vouched for by signed events from trusted
-    /// devices, plus whether a trusted device signed the workspace's creation.
-    pub fn attested(&self, trusted: impl Fn(&str, i64, &str) -> bool) -> Result<Attested> {
+    /// devices, per doc, plus whether a trusted device signed the workspace's
+    /// creation. An event only vouches for the doc it names, and a `private.*`
+    /// event only for a private doc (and the other way round), so the looser
+    /// rules for members' private docs never reach shared ones.
+    pub fn attested(&self, trusted: &Trusted) -> Result<Attested> {
         let mut out = Attested::default();
         for e in self.all()? {
-            if !trusted(&e.device, e.ts, &e.action) {
+            let doc = e.doc();
+            if doc.is_empty() || !trusted(&e.device, e.ts, &e.action, &doc) {
+                continue;
+            }
+            if e.action.starts_with("private.") != crate::workspace::is_private_doc(&doc) {
                 continue;
             }
             let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) else { continue };
             if let Some(h) = data.get("change").and_then(|v| v.as_str()) {
-                out.hashes.insert(h.to_string());
+                out.add(&doc, h);
             }
             if let Some(hs) = data.get("heads").and_then(|v| v.as_array()) {
-                out.hashes.extend(hs.iter().filter_map(|v| v.as_str()).map(str::to_string));
+                for h in hs.iter().filter_map(|v| v.as_str()) {
+                    out.add(&doc, h);
+                }
             }
             if e.action == "workspace.create" {
                 out.workspace_created = true;
@@ -310,7 +361,7 @@ impl EventLog {
 
         let mut problems = Vec::new();
         for (device, chain) in &by_device {
-            let short = &device[..device.len().min(12)];
+            let short = short_id(device);
             let vk = match decode_key(device) {
                 Ok(k) => k,
                 Err(_) => {
@@ -348,6 +399,11 @@ impl EventLog {
             problems,
         })
     }
+}
+
+/// The first characters of an id for messages; safe on any string.
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
 }
 
 fn row_to_event(r: &rusqlite::Row) -> rusqlite::Result<Event> {

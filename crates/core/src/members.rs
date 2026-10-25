@@ -446,15 +446,26 @@ impl Members {
     }
 
     /// Whether an event signed by `device` at `ts` counts in this workspace.
-    /// `action` is the event's action: a few are the owner's alone.
-    pub fn trusts_event(&self, device: &str, ts: i64, action: &str, own: &IdentityState) -> bool {
+    /// `action` is the event's action: a few are the owner's alone. `doc` is
+    /// the doc the event is about (empty for membership events).
+    pub fn trusts_event(&self, device: &str, ts: i64, action: &str, doc: &str, own: &IdentityState) -> bool {
         // Private docs (pins and the like) are each member's own and never
-        // leave their devices, so viewers may log changes to them too. The
-        // docs themselves only travel between a member's own devices.
+        // leave their devices, so viewers may log changes to them too, but
+        // only to their own private doc: a `private.*` event vouching for
+        // anything else would let a viewer change what everyone sees.
         if action.starts_with("private.") {
-            return self
-                .device_users(device, own)
-                .any(|ids| ids.trusted_at(device, ts) && self.role(&ids.user).is_some_and(Role::has_access));
+            return crate::workspace::is_private_doc(doc)
+                && self.device_users(device, own).any(|ids| {
+                    ids.trusted_at(device, ts)
+                        && self.role(&ids.user).is_some_and(Role::has_access)
+                        && (crate::workspace::private_doc_id(&ids.user) == doc
+                            || ids.predecessors.iter().any(|p| crate::workspace::private_doc_id(&p.from) == doc))
+                });
+        }
+        // Shared docs are never touched through private.* events, and
+        // private docs never through anything else.
+        if crate::workspace::is_private_doc(doc) {
+            return false;
         }
         self.device_users(device, own).any(|ids| {
             ids.trusted_at(device, ts)
@@ -749,23 +760,23 @@ mod tests {
         let x_dev = key_id(&xd.verifying_key());
 
         assert_eq!(m.role(&oid.user), Some(Role::Owner));
-        assert!(m.trusts_event(&key_id(&od.verifying_key()), 0, "note.edit", &oid));
-        assert!(!m.trusts_event(&x_dev, 0, "note.edit", &oid), "strangers can't edit");
+        assert!(m.trusts_event(&key_id(&od.verifying_key()), 0, "note.edit", "", &oid));
+        assert!(!m.trusts_event(&x_dev, 0, "note.edit", "", &oid), "strangers can't edit");
 
         let added = m.set_role(&owner, &xid, Role::Viewer, None).unwrap();
         assert_eq!(m.role(&xid.user), Some(Role::Viewer));
         assert!(m.device_has_access(&x_dev, &oid));
-        assert!(!m.trusts_event(&x_dev, added.issued + 10, "note.edit", &oid), "viewers can't edit");
+        assert!(!m.trusts_event(&x_dev, added.issued + 10, "note.edit", "", &oid), "viewers can't edit");
 
         let promoted = m.set_role(&owner, &xid, Role::Editor, None).unwrap();
-        assert!(m.trusts_event(&x_dev, promoted.issued + 10, "note.edit", &oid));
-        assert!(!m.trusts_event(&x_dev, promoted.issued + 10, "workspace.rename", &oid), "editors can't rename");
-        assert!(m.trusts_event(&key_id(&od.verifying_key()), promoted.issued + 10, "workspace.rename", &oid));
+        assert!(m.trusts_event(&x_dev, promoted.issued + 10, "note.edit", "", &oid));
+        assert!(!m.trusts_event(&x_dev, promoted.issued + 10, "workspace.rename", "", &oid), "editors can't rename");
+        assert!(m.trusts_event(&key_id(&od.verifying_key()), promoted.issued + 10, "workspace.rename", "", &oid));
 
         let removed = m.set_role(&owner, &xid, Role::Removed, None).unwrap();
         assert!(!m.device_has_access(&x_dev, &oid));
-        assert!(m.trusts_event(&x_dev, removed.issued - 1, "note.edit", &oid), "edits from before removal stand");
-        assert!(!m.trusts_event(&x_dev, removed.issued + 1, "note.edit", &oid), "edits after removal don't");
+        assert!(m.trusts_event(&x_dev, removed.issued - 1, "note.edit", "", &oid), "edits from before removal stand");
+        assert!(!m.trusts_event(&x_dev, removed.issued + 1, "note.edit", "", &oid), "edits after removal don't");
 
         let people = m.people();
         assert_eq!(people.len(), 2);

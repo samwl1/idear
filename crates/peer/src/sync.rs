@@ -682,7 +682,7 @@ impl SyncCtx {
             };
             // Any open copy caches docs that are about to change on disk.
             open.remove(&wb.id);
-            let trusted = |d: &str, ts: i64, action: &str| effective.trusts_event(d, ts, action, &own);
+            let trusted = |d: &str, ts: i64, action: &str, doc: &str| effective.trusts_event(d, ts, action, doc, &own);
             // Another person's device has no business sending private docs;
             // drop any that arrive rather than merging them.
             let stripped;
@@ -953,8 +953,10 @@ impl SyncCtx {
     }
 }
 
+/// The first characters of an id for messages. Ids from peers aren't
+/// trusted to be ASCII, so this never slices inside a character.
 fn short(id: &str) -> &str {
-    &id[..id.len().min(8)]
+    id.get(..8).unwrap_or(id)
 }
 
 // ---- wire format ----------------------------------------------------------------

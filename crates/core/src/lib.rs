@@ -482,7 +482,7 @@ mod sync_files {
 
     fn unpack(s: &Setup, root: &std::path::Path, bytes: &[u8], ids: &IdentityState, me: &SigningKey) -> WorkspaceImport {
         let b = bundle::open(&s.user, bytes, None).unwrap();
-        let trusted = |d: &str, ts: i64, _: &str| ids.trusted_at(d, ts);
+        let trusted = |d: &str, ts: i64, _: &str, _: &str| ids.trusted_at(d, ts);
         Workspace::import(root, &b.workspaces[0], None, &trusted, &key_id(&me.verifying_key())).unwrap()
     }
 
@@ -582,7 +582,7 @@ mod sync_files {
     fn live_sync_sends_only_whats_missing() {
         let s = setup();
         let (ra, rb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let trusted = |d: &str, ts: i64, _: &str| s.ids.trusted_at(d, ts);
+        let trusted = |d: &str, ts: i64, _: &str, _: &str| s.ids.trusted_at(d, ts);
         let b_id = key_id(&s.b.verifying_key());
 
         let mut m = manifest_with("W");
@@ -736,7 +736,7 @@ mod sharing {
         if let Some(t) = &theirs {
             effective.merge(t).unwrap();
         }
-        let trusted = |d: &str, ts: i64, action: &str| effective.trusts_event(d, ts, action, own_to);
+        let trusted = |d: &str, ts: i64, action: &str, doc: &str| effective.trusts_event(d, ts, action, doc, own_to);
         Workspace::import(to, &bundle, theirs.as_ref(), &trusted, &key_id(&me.verifying_key())).unwrap()
     }
 
@@ -831,7 +831,7 @@ mod sharing {
         assert!(m.device_has_access(&od_id, &vid));
         assert_eq!(m.device_user(&od_id, now_ms(), &vid).map(|i| i.user.clone()), Some(oid.user.clone()));
         // Val's own device gets no edit rights from the extra certificate.
-        assert!(!m.trusts_event(&key_id(&vd.verifying_key()), now_ms(), "tree.rename", &vid));
+        assert!(!m.trusts_event(&key_id(&vd.verifying_key()), now_ms(), "tree.rename", "manifest", &vid));
     }
 
     #[test]
@@ -864,6 +864,49 @@ mod sharing {
     }
 
     #[test]
+    fn a_private_event_cannot_vouch_for_a_shared_doc() {
+        // A viewer may log private.* events (their own pins). One of those
+        // events naming a layout change as its "change" must not let that
+        // change in: a vouched hash only counts for the doc the event names,
+        // and private events only for the signer's own private doc.
+        let (owner, od, oid) = person(1, 11, "Sam");
+        let (_, vd, vid) = person(3, 13, "Val");
+        let (ro, rv) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut ws = Workspace::create(ro.path(), "w", &manifest().save(), &od).unwrap();
+        ws.ensure_members(&oid).unwrap();
+        ws.update_members(|m| m.set_role(&owner, &vid, Role::Viewer, None)).unwrap();
+        drop(ws);
+        assert!(send(ro.path(), rv.path(), &vid, &vd).created);
+
+        let mut theirs = Workspace::open(rv.path(), "w").unwrap();
+        let mut forged = AutoCommit::new();
+        let t = forged.put_object(ROOT, "name", ObjType::Text).unwrap();
+        forged.splice_text(&t, 0, 0, "Pwned").unwrap();
+        forged.put_object(ROOT, "nodes", ObjType::Map).unwrap();
+        forged.commit();
+        let change = forged.get_last_local_change().unwrap();
+        let hash = change.hash().to_string();
+        theirs
+            .docs
+            .import_changes("manifest", vec![automerge::Change::from_bytes(change.raw_bytes().to_vec()).unwrap()], |_| true)
+            .unwrap();
+        // Three shapes of a forged voucher: a private event naming the
+        // manifest, a private event naming Val's own pins doc, and a private
+        // event naming the owner's pins doc.
+        let pins = workspace::private_doc_id(&vid.user);
+        for doc in ["manifest", pins.as_str(), &workspace::private_doc_id(&oid.user)] {
+            theirs
+                .log_event(&vd, "private.edit", doc, serde_json::json!({ "doc": doc, "kind": "private", "change": hash }))
+                .unwrap();
+        }
+        drop(theirs);
+
+        let r = send(rv.path(), ro.path(), &oid, &od);
+        assert!(r.problems.iter().any(|p| p.contains("workspace layout")), "{r:?}");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
+    }
+
+    #[test]
     fn a_copy_with_another_owner_is_refused() {
         let (_, od, oid) = person(1, 11, "Sam");
         let (_, xd, xid) = person(2, 12, "Alex");
@@ -876,7 +919,7 @@ mod sharing {
         theirs.ensure_members(&xid).unwrap();
         let bundle = theirs.export(true).unwrap();
         let m = theirs.members().cloned();
-        let trusted = |_: &str, _: i64, _: &str| true;
+        let trusted = |_: &str, _: i64, _: &str, _: &str| true;
         assert!(Workspace::import(ro.path(), &bundle, m.as_ref(), &trusted, "me").is_err());
     }
 }

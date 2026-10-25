@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::docs::{get_bool, get_i64, get_map, get_map_list, get_string, get_string_list, root, DocStore};
 use crate::error::{CoreError, Result};
 use crate::bundle::{DocBundle, WorkspaceBundle};
-use crate::eventlog::{Event, EventLog, VerifyReport};
+use crate::eventlog::{Event, EventLog, Trusted, VerifyReport};
 use crate::identity::IdentityState;
 use crate::members::Members;
 use crate::index::{HubRow, Index, ItemRecord, Links, NodeRecord, TaskRecord, TreeNode, ViewQuery, ViewRow};
@@ -61,7 +61,7 @@ pub const PRIVATE: &str = "private";
 
 /// The id of `user`'s private doc in a workspace.
 pub fn private_doc_id(user: &str) -> String {
-    format!("{PRIVATE}-{}", &user[..user.len().min(48)])
+    format!("{PRIVATE}-{}", user.get(..48).unwrap_or(user))
 }
 
 /// Whether `id` is some member's private doc.
@@ -177,7 +177,7 @@ impl Workspace {
         root_dir: &Path,
         wb: &WorkspaceBundle,
         members: Option<&Members>,
-        trusted: &dyn Fn(&str, i64, &str) -> bool,
+        trusted: &Trusted,
         device: &str,
     ) -> Result<WorkspaceImport> {
         validate_id(&wb.id)?;
@@ -210,7 +210,7 @@ impl Workspace {
         dir: &Path,
         wb: &WorkspaceBundle,
         members: Option<&Members>,
-        trusted: &dyn Fn(&str, i64, &str) -> bool,
+        trusted: &Trusted,
         device: &str,
         created: bool,
     ) -> Result<WorkspaceImport> {
@@ -258,7 +258,7 @@ impl Workspace {
             // any member could put a whole new tree at the root.
             let legacy_root = is_manifest && attested.legacy_create && ws.docs.peek(&d.id)?.is_none();
             let accept = |c: &automerge::Change| {
-                attested.hashes.contains(&c.hash().to_string()) || (legacy_root && c.deps().is_empty())
+                attested.vouches(&d.id, &c.hash().to_string()) || (legacy_root && c.deps().is_empty())
             };
             let imported = match ws.docs.import_changes(&d.id, incoming, accept) {
                 Ok(r) => r,

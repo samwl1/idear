@@ -965,7 +965,7 @@ async fn sync_now(peer: &Peer) -> Res<String> {
     }
     let mut out = String::new();
     for (device, p) in &status.peers {
-        let who = &device[..8.min(device.len())];
+        let who = device.get(..8).unwrap_or(device);
         match (&p.last_error, p.last_sync) {
             (Some(e), _) => out.push_str(&format!("- device {who}…: {e}\n")),
             (None, Some(_)) => out.push_str(&format!("- device {who}…: synced\n")),
