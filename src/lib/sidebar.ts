@@ -24,9 +24,15 @@ function save(key: string, value: unknown) {
 
 export const clampWidth = (w: number) => Math.round(Math.min(RAIL_MAX, Math.max(RAIL_MIN, w)));
 
-export function useSidebar() {
+/**
+ * `remember`: keep the collapsed state across launches. A pop-out window
+ * starts collapsed and keeps its own state for its lifetime, without writing
+ * it where the main window would pick it up next time.
+ */
+export function useSidebar(remember = true, startCollapsed = false) {
   const [width, setWidthState] = useState(() => clampWidth(load("sidebar:width", RAIL_DEFAULT)));
-  const [collapsed, setCollapsedState] = useState(() => load("sidebar:collapsed", false));
+  const [collapsed, setCollapsedState] = useState(() => (remember ? load("sidebar:collapsed", startCollapsed) : startCollapsed));
+  const persist = useCallback((c: boolean) => remember && save("sidebar:collapsed", c), [remember]);
 
   const setWidth = useCallback((w: number) => {
     const c = clampWidth(w);
@@ -34,10 +40,13 @@ export function useSidebar() {
     save("sidebar:width", c);
   }, []);
 
-  const setCollapsed = useCallback((c: boolean) => {
-    setCollapsedState(c);
-    save("sidebar:collapsed", c);
-  }, []);
+  const setCollapsed = useCallback(
+    (c: boolean) => {
+      setCollapsedState(c);
+      persist(c);
+    },
+    [persist],
+  );
 
   // Cmd+\ (Ctrl+\ on Linux) shows and hides it, like most editors.
   useEffect(() => {
@@ -45,14 +54,14 @@ export function useSidebar() {
       if (e.key === "\\" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         setCollapsedState((c) => {
-          save("sidebar:collapsed", !c);
+          persist(!c);
           return !c;
         });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [persist]);
 
   return { width, setWidth, collapsed, setCollapsed };
 }
