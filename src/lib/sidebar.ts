@@ -26,8 +26,8 @@ export const clampWidth = (w: number) => Math.round(Math.min(RAIL_MAX, Math.max(
 
 /**
  * `remember`: keep the collapsed state across launches. A pop-out window
- * starts collapsed and keeps its own state for its lifetime, without writing
- * it where the main window would pick it up next time.
+ * passes false: it never shows the sidebar, and must not write a collapsed
+ * state that the main window would pick up next time.
  */
 export function useSidebar(remember = true, startCollapsed = false) {
   const [width, setWidthState] = useState(() => clampWidth(load("sidebar:width", RAIL_DEFAULT)));
@@ -48,8 +48,10 @@ export function useSidebar(remember = true, startCollapsed = false) {
     [persist],
   );
 
-  // Cmd+\ (Ctrl+\ on Linux) shows and hides it, like most editors.
+  // Cmd+\ (Ctrl+\ on Linux) shows and hides it, like most editors. Not in a
+  // pop-out, which has no sidebar to show.
   useEffect(() => {
+    if (!remember) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "\\" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -61,7 +63,7 @@ export function useSidebar(remember = true, startCollapsed = false) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [persist]);
+  }, [persist, remember]);
 
   return { width, setWidth, collapsed, setCollapsed };
 }

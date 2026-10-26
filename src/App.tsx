@@ -52,8 +52,8 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([]);
   const [session, setSession] = useState<WorkspaceSession | null>(null);
   const [pane, setPane] = useState<Pane>(null);
-  // A pop-out opens on one page with the sidebar tucked away, but it's a
-  // whole window: the sidebar can be shown, and what happens there stays there.
+  // A pop-out is one page using the whole window: no sidebar, and nothing it
+  // does to the sidebar setting reaches the main window.
   const sidebar = useSidebar(!POP, !!POP);
   const toast = useToast();
   const [account, setAccountState] = useState<AccountView | null>(null);
@@ -411,13 +411,13 @@ export default function App() {
     <CanEditContext.Provider value={canEdit}>
     <div
       className="app"
-      data-rail={session && current ? (sidebar.collapsed ? "collapsed" : "open") : undefined}
+      data-rail={session && current ? (sidebar.collapsed || POP ? "collapsed" : "open") : undefined}
       data-popout={POP ? true : undefined}
       style={{ ["--rail-w" as string]: `${sidebar.width}px` }}
     >
       {session && current ? (
         <>
-          {sidebar.collapsed && (
+          {sidebar.collapsed && !POP && (
             <button
               className="rail-open"
               aria-label="Show sidebar"
@@ -427,7 +427,7 @@ export default function App() {
               <Icon name="sidebar" />
             </button>
           )}
-          <aside className="rail" hidden={sidebar.collapsed}>
+          <aside className="rail" hidden={sidebar.collapsed || !!POP}>
             <div
               className="rail-resize"
               role="separator"
