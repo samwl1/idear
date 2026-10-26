@@ -4,9 +4,13 @@
 //! device (concurrent writers can't share a single linear chain). Each event is
 //! hashed over its canonical fields and signed with the device's Ed25519 key.
 //!
-//! Events name the workspace they were logged in, so one signed in a workspace
-//! can't be replayed into another by someone who is a member of both. Events
-//! from before that field existed carry none and verify as they always did.
+//! Events name the workspace they were logged in (`data.ws`), so one signed
+//! in a workspace can't be replayed into another by someone who is a member
+//! of both. It rides inside `data`, which was always hashed and signed, so
+//! builds from before the check verify these events as they always did and
+//! only skip the check; events from before it carry no name. (A short-lived
+//! build kept it in a separate `workspace` column covered by the hash; those
+//! events still verify that way.)
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,13 +42,27 @@ pub struct Event {
     pub data: String,
     pub hash: String,
     pub sig: String,
-    /// The workspace this was logged in; covered by the hash when present.
-    /// Absent only on events from before it was recorded.
+    /// Transitional: a build that kept the workspace in its own hashed field
+    /// rather than in `data`. Set only on events it wrote; see `workspace()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
 }
 
+/// The key in `data` naming the workspace an event was logged in.
+pub const WS_KEY: &str = "ws";
+
 impl Event {
+    /// The workspace this event was logged in, from `data.ws` (or the
+    /// transitional field). None on events from before it was recorded.
+    pub fn workspace(&self) -> Option<String> {
+        if let Some(w) = &self.workspace {
+            return Some(w.clone());
+        }
+        serde_json::from_str::<serde_json::Value>(&self.data)
+            .ok()
+            .and_then(|d| d.get(WS_KEY).and_then(|v| v.as_str()).map(str::to_string))
+    }
+
     /// The doc this event is about: `data.doc`, or the manifest for the
     /// workspace's creation event. Empty for events about nothing in
     /// particular (membership, invites).
@@ -69,7 +87,8 @@ struct Canonical<'a> {
     action: &'a str,
     target: &'a str,
     data: &'a str,
-    /// Left out entirely when absent, so older events hash as before.
+    /// Only the transitional field; left out entirely otherwise, so events
+    /// hash as they always did and older builds verify them.
     #[serde(skip_serializing_if = "Option::is_none")]
     workspace: Option<&'a str>,
 }
@@ -188,7 +207,15 @@ impl EventLog {
         data: &serde_json::Value,
     ) -> Result<Event> {
         let device = hex::encode(key.verifying_key().to_bytes());
-        let data = serde_json::to_string(data)?;
+        // Name the workspace inside the data, where the hash already covers it.
+        let data = match data {
+            serde_json::Value::Object(map) => {
+                let mut map = map.clone();
+                map.insert(WS_KEY.to_string(), serde_json::Value::String(self.workspace.clone()));
+                serde_json::to_string(&serde_json::Value::Object(map))?
+            }
+            other => serde_json::to_string(other)?,
+        };
         let tx = self.conn.transaction()?;
 
         let last: Option<(u64, String)> = tx
@@ -214,7 +241,7 @@ impl EventLog {
             data,
             hash: String::new(),
             sig: String::new(),
-            workspace: Some(self.workspace.clone()),
+            workspace: None,
         };
         let digest = canonical_hash(&event)?;
         event.hash = hex::encode(digest);
@@ -286,7 +313,7 @@ impl EventLog {
                 }
                 None => {}
             }
-            if e.workspace.as_deref().is_some_and(|w| w != self.workspace) {
+            if e.workspace().is_some_and(|w| w != self.workspace) {
                 report.rejected += 1;
                 report.problems.push(format!("device {short} event #{} belongs to another workspace", e.seq));
                 continue;
@@ -422,7 +449,7 @@ impl EventLog {
                 if e.prev.as_deref() != expected_prev {
                     problems.push(format!("device {short} seq {}: broken link to previous event", e.seq));
                 }
-                if e.workspace.as_deref().is_some_and(|w| w != self.workspace) {
+                if e.workspace().is_some_and(|w| w != self.workspace) {
                     problems.push(format!("device {short} seq {}: logged in another workspace", e.seq));
                 }
                 let digest = canonical_hash(e)?;
@@ -501,7 +528,9 @@ mod tests {
         let mut a = open(dir.path(), "w1");
         a.append(&k, "note.edit", "n", &serde_json::json!({ "doc": "n", "change": "abc" })).unwrap();
         let events = a.all().unwrap();
-        assert_eq!(events[0].workspace.as_deref(), Some("w1"));
+        assert_eq!(events[0].workspace().as_deref(), Some("w1"));
+        assert!(events[0].workspace.is_none(), "named inside data, not a hashed field");
+        assert!(events[0].data.contains("\"ws\":\"w1\""), "{}", events[0].data);
         assert!(a.verify().unwrap().ok);
 
         // The same signed event offered to another workspace is refused,
@@ -557,6 +586,43 @@ mod tests {
         let r = log.import(&[e], &|_, _, _, _| true).unwrap();
         assert_eq!((r.added, r.rejected), (1, 0), "{r:?}");
         assert!(log.verify().unwrap().ok);
+
+        // A new event hashes the old way too: a build without the check
+        // verifies it, it just doesn't know what `ws` means.
+        let e2 = log.append(&k, "note.edit", "n", &serde_json::json!({ "doc": "n" })).unwrap();
+        let old = Old { device: &e2.device, seq: 2, prev: e2.prev.as_deref(), ts: e2.ts, action: "note.edit", target: "n", data: &e2.data };
+        assert_eq!(e2.hash, hex::encode(Sha256::digest(serde_json::to_vec(&old).unwrap())));
+    }
+
+    /// One build wrote the workspace into its own hashed field. Those events
+    /// verify and import as they were written, and still can't move workspaces.
+    #[test]
+    fn transitional_events_with_a_hashed_workspace_field_still_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = key(10);
+        let device = hex::encode(k.verifying_key().to_bytes());
+        let mut e = Event {
+            device,
+            seq: 1,
+            prev: None,
+            ts: 1,
+            action: "private.create".into(),
+            target: "private-x".into(),
+            data: "{\"doc\":\"private-x\"}".into(),
+            hash: String::new(),
+            sig: String::new(),
+            workspace: Some("w1".into()),
+        };
+        let digest = canonical_hash(&e).unwrap();
+        e.hash = hex::encode(digest);
+        e.sig = hex::encode(k.sign(&digest).to_bytes());
+        let mut log = open(dir.path(), "w1");
+        let r = log.import(&[e.clone()], &|_, _, _, _| true).unwrap();
+        assert_eq!((r.added, r.rejected), (1, 0), "{r:?}");
+        assert!(log.verify().unwrap().ok, "{:?}", log.verify().unwrap().problems);
+        let mut other = open(dir.path(), "w2");
+        let r = other.import(&[e], &|_, _, _, _| true).unwrap();
+        assert_eq!(r.rejected, 1);
     }
 
     #[test]

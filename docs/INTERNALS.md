@@ -73,8 +73,9 @@ from another device.
 - The header (format version and identities) is authenticated, in passphrase files too.
 - On import, every event must verify, come from a device allowed to change that workspace at the
   time (see [Sharing](SHARING.md#how-it-works)), name this workspace (events carry the id of the
-  workspace they were logged in inside the signed fields, so one can't be replayed into another;
-  events from before that field existed have none), and extend that device's history exactly.
+  workspace they were logged in as `ws` inside their signed data, so one can't be replayed into
+  another; builds from before the check verify them all the same and just don't check, and
+  events from before it have no name), and extend that device's history exactly.
   Every Automerge change must be vouched for by such an event about the same doc; changes that
   aren't, and anything built on them, are skipped and reported. A layout change that alters the
   workspace's name is only taken from a creation or rename event, which only the owner can log.
