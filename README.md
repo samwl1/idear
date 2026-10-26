@@ -43,6 +43,21 @@ Also in the app under **Settings → Help**.
 - [How it works](docs/INTERNALS.md): code layout, identity, sync, update files, data on disk,
   known gaps.
 
+## Install
+
+Grab the latest build from [Releases](https://github.com/samwl1/idear/releases/latest):
+
+- **macOS**: `idear_<version>_universal.dmg` (Apple Silicon and Intel). The build isn't notarized
+  yet, so the first time, right-click the app and choose **Open**. If macOS says it's damaged, run
+  `xattr -cr /Applications/idear.app` once.
+- **Linux**: the `.AppImage` runs anywhere (`chmod +x` it first); `.deb` for Debian/Ubuntu, `.rpm`
+  for Fedora. Needs a running Secret Service (GNOME Keyring or KWallet) for the keyring.
+- **Windows**: not yet.
+
+Releases are built by [GitHub Actions](.github/workflows/release.yml) when a `v*` tag is pushed:
+bump the version in `package.json`, `src-tauri/tauri.conf.json` and `src-tauri/Cargo.toml`, then
+`git tag v1.1.0 && git push origin v1.1.0`.
+
 ## Run it
 
 Prerequisites:
