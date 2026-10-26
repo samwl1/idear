@@ -32,9 +32,22 @@ pub fn list_workspaces(root: &Path) -> Result<Vec<WorkspaceInfo>> {
         if !entry.path().join("events.db").exists() || validate_id(&id).is_err() {
             continue;
         }
-        // One damaged folder must not hide every other workspace.
-        let Ok(ws) = Workspace::open(root, &id) else { continue };
-        let Ok(name) = ws.name() else { continue };
+        // One damaged folder must not hide every other workspace, but say
+        // which one was skipped and why, or it just looks lost.
+        let ws = match Workspace::open(root, &id) {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("Couldn't open workspace {id}: {e}");
+                continue;
+            }
+        };
+        let name = match ws.name() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Couldn't read the name of workspace {id}: {e}");
+                continue;
+            }
+        };
         out.push(WorkspaceInfo { name, id });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
