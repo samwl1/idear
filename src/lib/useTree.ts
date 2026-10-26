@@ -17,9 +17,12 @@ export function useTree(session: WorkspaceSession, onError: (err: unknown) => vo
     const refresh = () => api.tree(session.id).then((n) => live && setNodes(n), onError);
     refresh();
     const unsubscribe = session.subscribe(refresh);
+    // The index was rebuilt behind the session's back (Activity → Rebuild index).
+    window.addEventListener("tree-changed", refresh);
     return () => {
       live = false;
       unsubscribe();
+      window.removeEventListener("tree-changed", refresh);
     };
   }, [session, onError]);
 

@@ -26,6 +26,22 @@ use crate::{now_ms, validate_id};
 
 pub const MANIFEST: &str = "manifest";
 
+/// What `Workspace::check` found.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckReport {
+    pub ok: bool,
+    pub docs: usize,
+    /// In the sidebar's index but not in the layout: ghosts. `repair_index` removes them.
+    pub index_only: Vec<String>,
+    /// In the layout but not in the index. `repair_index` adds them.
+    pub layout_only: Vec<String>,
+    /// Trusted events whose change isn't in the doc they name: a change
+    /// that was refused or never arrived. Sync can't fix these on its own
+    /// if the other device thinks they're here.
+    pub unapplied: Vec<String>,
+}
+
 /// What importing one workspace from an update file did.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,7 +89,7 @@ pub struct Workspace {
     pub id: String,
     dir: PathBuf,
     pub(crate) docs: DocStore,
-    index: Index,
+    pub(crate) index: Index,
     log: EventLog,
     members: Option<Members>,
 }
@@ -472,6 +488,14 @@ impl Workspace {
         self.index.tree()
     }
 
+    /// Whether the layout lists `id`. Without a layout yet (a workspace
+    /// still being created), everything counts as listed.
+    fn layout_lists(&mut self, id: &str) -> Result<bool> {
+        let Some(m) = self.docs.peek(MANIFEST)? else { return Ok(true) };
+        let Some(map) = get_map(m, &root(), "nodes")? else { return Ok(true) };
+        Ok(automerge::ReadDoc::get(m, &map, id)?.is_some())
+    }
+
     pub fn query(&self, q: &ViewQuery) -> Result<Vec<ViewRow>> {
         self.index.query(q, now_ms())
     }
@@ -488,6 +512,89 @@ impl Workspace {
         self.log.list(limit, offset)
     }
 
+    /// Compare the three copies of the truth here: the layout doc, the index
+    /// built from it, and the events that vouch for changes. Reports what
+    /// disagrees; `repair_index` fixes the index side.
+    pub fn check(&mut self) -> Result<CheckReport> {
+        use automerge::ReadDoc;
+        let mut report = CheckReport::default();
+        // 1. Layout vs index.
+        let manifest = self.docs.get(MANIFEST)?;
+        let r = root();
+        let mut in_layout = std::collections::BTreeSet::new();
+        if let Some(map) = get_map(manifest, &r, "nodes")? {
+            for id in automerge::ReadDoc::keys(manifest, &map) {
+                in_layout.insert(id);
+            }
+        }
+        let in_index: std::collections::BTreeMap<String, String> = self.index.tree()?.into_iter().map(|n| (n.id, n.title)).collect();
+        for (id, title) in &in_index {
+            if !in_layout.contains(id) {
+                report.index_only.push(format!("{} ({})", if title.is_empty() { "Untitled" } else { title }, id));
+            }
+        }
+        for id in &in_layout {
+            if !in_index.contains_key(id) {
+                report.layout_only.push(id.clone());
+            }
+        }
+        // 2. Events vs docs: every change an event vouches for should be in its doc.
+        for e in self.log.all()? {
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) else { continue };
+            let Some(doc_id) = data.get("doc").and_then(|v| v.as_str()) else { continue };
+            let mut hashes: Vec<String> = Vec::new();
+            if let Some(h) = data.get("change").and_then(|v| v.as_str()) {
+                hashes.push(h.to_string());
+            }
+            if let Some(hs) = data.get("heads").and_then(|v| v.as_array()) {
+                hashes.extend(hs.iter().filter_map(|v| v.as_str()).map(str::to_string));
+            }
+            if hashes.is_empty() {
+                continue;
+            }
+            let doc = self.docs.peek(doc_id)?;
+            for h in hashes {
+                let present = doc.is_some_and(|d| h.parse::<automerge::ChangeHash>().ok().is_some_and(|ch| d.get_change_by_hash(&ch).is_some()));
+                if !present {
+                    report.unapplied.push(format!(
+                        "{} #{} ({}, {}): change {} {}",
+                        &e.device[..e.device.len().min(8)],
+                        e.seq,
+                        e.action,
+                        if doc_id == MANIFEST { "layout".to_string() } else { format!("doc {}", &doc_id[..doc_id.len().min(8)]) },
+                        &h[..h.len().min(8)],
+                        if doc.is_none() { "(doc not here)" } else { "not in the doc" }
+                    ));
+                }
+            }
+        }
+        report.docs = self.index.docs()?.len();
+        report.ok = report.index_only.is_empty() && report.layout_only.is_empty() && report.unapplied.is_empty();
+        Ok(report)
+    }
+
+    /// Rebuild the index from the docs: the layout and every item, as if
+    /// each had just arrived. Fixes a sidebar that lists what the layout no
+    /// longer has, and search results for text that changed without being
+    /// indexed. Leaves the docs and the log alone.
+    pub fn repair_index(&mut self, device: &str) -> Result<usize> {
+        let ts = now_ms();
+        let mut n = 0;
+        // The layout first: it decides what the tree holds.
+        if self.docs.exists(MANIFEST)? {
+            self.reindex(MANIFEST, MANIFEST, device, ts)?;
+            n += 1;
+        }
+        for (id, kind) in self.index.docs()? {
+            if id == MANIFEST || !self.docs.exists(&id)? {
+                continue;
+            }
+            self.reindex(&id, &kind, device, ts)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub fn verify_log(&self) -> Result<VerifyReport> {
         self.log.verify()
     }
@@ -500,6 +607,14 @@ impl Workspace {
     }
 
     fn reindex(&mut self, doc_id: &str, kind: &str, device: &str, ts: i64) -> Result<()> {
+        // A doc the layout doesn't list is history (a deleted page, or one
+        // whose layout entry hasn't arrived): it gets no sidebar or search
+        // row. Indexing it anyway is how ghosts appeared: an edit to a
+        // deleted page's doc put it back in the sidebar.
+        if ITEM_KINDS.contains(&kind) && !self.layout_lists(doc_id)? {
+            self.index.remove_item(doc_id)?;
+            return Ok(());
+        }
         let doc = self.docs.get(doc_id)?;
         let r = root();
         match kind {
@@ -528,8 +643,21 @@ impl Workspace {
                     }
                 }
                 self.index.set_meta("name", &name)?;
+                let before: std::collections::HashSet<String> = self.index.tree()?.into_iter().map(|n| n.id).collect();
                 self.index.sync_tree(&nodes, device, ts)?;
                 self.index.sync_views(&views, device, ts)?;
+                // Pages the layout just started listing: index their docs now,
+                // since an item's own reindex is skipped while it's unlisted.
+                let newly: Vec<(String, String)> = nodes
+                    .iter()
+                    .filter(|n| n.kind != "folder" && !before.contains(&n.id))
+                    .map(|n| (n.id.clone(), n.kind.clone()))
+                    .collect();
+                for (id, kind) in newly {
+                    if self.docs.exists(&id)? && self.index.doc_kind(&id)?.is_some() {
+                        self.reindex(&id, &kind, device, ts)?;
+                    }
+                }
             }
             "note" | "whiteboard" | "tracker" => {
                 let title = get_string(doc, &r, "title")?.unwrap_or_default();
