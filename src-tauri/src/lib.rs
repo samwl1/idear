@@ -109,6 +109,8 @@ pub fn run() {
             commands::links_of,
             commands::list_events,
             commands::verify_log,
+            commands::check_workspace,
+            commands::repair_index,
             commands::git_info,
             commands::path_exists,
             commands::git_branches,

@@ -78,6 +78,19 @@ mod tests {
         d
     }
 
+    /// List `id` in the layout, as the app does right after creating its doc.
+    /// Only listed docs are indexed.
+    fn list_in_layout(ws: &mut Workspace, k: &SigningKey, id: &str, kind: &str) {
+        let mut m = AutoCommit::load(&ws.load_doc(workspace::MANIFEST).unwrap()).unwrap();
+        let (_, nodes) = automerge::ReadDoc::get(&m, ROOT, "nodes").unwrap().unwrap();
+        let n = m.put_object(&nodes, id, ObjType::Map).unwrap();
+        m.put(&n, "kind", kind).unwrap();
+        m.put(&n, "order", "a0").unwrap();
+        m.commit();
+        let c = m.get_last_local_change().unwrap().raw_bytes().to_vec();
+        ws.apply_change(k, workspace::MANIFEST, c, "tree.add", Some(id)).unwrap();
+    }
+
     #[test]
     fn end_to_end() {
         let tmp = tempfile::tempdir().unwrap();
@@ -183,8 +196,11 @@ mod tests {
             d.save()
         };
         ws.create_doc(&k, "a", "note", &mk("Threat model", "signing keys", Some("security")), "note.create").unwrap();
+        list_in_layout(&mut ws, &k, "a", "note");
         ws.create_doc(&k, "b", "note", &mk("Groceries", "eggs", None), "note.create").unwrap();
+        list_in_layout(&mut ws, &k, "b", "note");
         ws.create_doc(&k, "c", "whiteboard", &mk("Arch diagram", "", Some("security")), "whiteboard.create").unwrap();
+        list_in_layout(&mut ws, &k, "c", "whiteboard");
 
         let q = |q: ViewQuery| ws.query(&q).unwrap().into_iter().map(|r| r.id).collect::<Vec<_>>();
         assert_eq!(q(ViewQuery::default()).len(), 3);
@@ -224,6 +240,7 @@ mod tests {
         let card = d.put_object(&els, "e2", ObjType::Map).unwrap();
         d.put(&card, "ref", "note-9").unwrap();
         ws.create_doc(&k, "wb", "whiteboard", &d.save(), "whiteboard.create").unwrap();
+        list_in_layout(&mut ws, &k, "wb", "whiteboard");
         let hits = ws.query(&ViewQuery { text: "boundary".into(), ..Default::default() }).unwrap();
         assert_eq!(hits.len(), 1);
         let db = rusqlite::Connection::open(ws.dir().join("index.sqlite")).unwrap();
@@ -273,6 +290,7 @@ mod tests {
             d.put_object(&task, "tags", ObjType::List).unwrap();
         }
         ws.create_doc(&k, "tr", "tracker", &d.save(), "tracker.create").unwrap();
+        list_in_layout(&mut ws, &k, "tr", "tracker");
 
         let q = |q: ViewQuery| ws.query(&q).unwrap();
         let rows = q(ViewQuery { types: vec!["task".into()], sort: "title".into(), ..Default::default() });
@@ -318,6 +336,7 @@ mod tests {
         let tl = tr.put_object(&task, "links", ObjType::List).unwrap();
         tr.insert(&tl, 0, "n1").unwrap();
         ws.create_doc(&k, "tr", "tracker", &tr.save(), "tracker.create").unwrap();
+        list_in_layout(&mut ws, &k, "tr", "tracker");
 
         // A whiteboard with a card pointing at the note.
         let mut wb = AutoCommit::new();
@@ -328,6 +347,7 @@ mod tests {
         let card = wb.put_object(&els, "c", ObjType::Map).unwrap();
         wb.put(&card, "ref", "n1").unwrap();
         ws.create_doc(&k, "wb", "whiteboard", &wb.save(), "whiteboard.create").unwrap();
+        list_in_layout(&mut ws, &k, "wb", "whiteboard");
 
         // The note: a summary, and links to the phase and the whiteboard.
         let mut note = AutoCommit::new();
@@ -342,6 +362,7 @@ mod tests {
         note.insert(&nl, 0, "ph1").unwrap();
         note.insert(&nl, 1, "wb").unwrap();
         ws.create_doc(&k, "n1", "note", &note.save(), "note.create").unwrap();
+        list_in_layout(&mut ws, &k, "n1", "note");
 
         let hub = ws.notes_hub().unwrap();
         assert_eq!(hub.len(), 1);
@@ -878,5 +899,54 @@ mod sharing {
         let m = theirs.members().cloned();
         let trusted = |_: &str, _: i64, _: &str| true;
         assert!(Workspace::import(ro.path(), &bundle, m.as_ref(), &trusted, "me").is_err());
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+    use crate::workspace::MANIFEST;
+    use automerge::transaction::Transactable;
+    use automerge::ReadDoc;
+    use ed25519_dalek::SigningKey;
+
+    /// A sidebar index that still lists a page the layout dropped is a
+    /// ghost; check finds it, repair removes it.
+    #[test]
+    fn check_finds_ghosts_and_repair_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = SigningKey::from_bytes(&[2; 32]);
+        let mut m = automerge::AutoCommit::new();
+        m.put(automerge::ROOT, "name", "Team").unwrap();
+        let nodes = m.put_object(automerge::ROOT, "nodes", automerge::ObjType::Map).unwrap();
+        let n = m.put_object(&nodes, "page1", automerge::ObjType::Map).unwrap();
+        m.put(&n, "kind", "note").unwrap();
+        m.put(&n, "order", "a0").unwrap();
+        let mut ws = Workspace::create(dir.path(), "w", &m.save(), &dev).unwrap();
+        let mut note = automerge::AutoCommit::new();
+        note.put(automerge::ROOT, "title", "Hello").unwrap();
+        ws.create_doc(&dev, "page1", "note", &note.save(), "note.create").unwrap();
+        assert_eq!(ws.tree().unwrap().len(), 1);
+        assert!(ws.check().unwrap().ok);
+
+        // Delete the page from the layout, then put the stale row back in the
+        // index behind the workspace's back (what a failed reindex leaves).
+        let mut m2 = automerge::AutoCommit::load(&ws.load_doc(MANIFEST).unwrap()).unwrap();
+        let (_, nodes) = m2.get(automerge::ROOT, "nodes").unwrap().unwrap();
+        m2.delete(&nodes, "page1").unwrap();
+        m2.commit();
+        let c = m2.get_last_local_change().unwrap().raw_bytes().to_vec();
+        ws.apply_change(&dev, MANIFEST, c, "tree.delete", Some("page1")).unwrap();
+        assert!(ws.tree().unwrap().is_empty());
+        ws.index
+            .sync_tree(&[index::NodeRecord { id: "page1".into(), kind: "note".into(), parent: None, sort_key: "a0".into(), title: None }], "dev", 1)
+            .unwrap();
+        assert_eq!(ws.tree().unwrap().len(), 1, "ghost in the index");
+
+        let r = ws.check().unwrap();
+        assert!(!r.ok && r.index_only.len() == 1 && r.unapplied.is_empty(), "{r:?}");
+        ws.repair_index("dev").unwrap();
+        assert!(ws.tree().unwrap().is_empty());
+        assert!(ws.check().unwrap().ok);
     }
 }

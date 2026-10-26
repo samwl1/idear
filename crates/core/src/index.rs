@@ -507,6 +507,22 @@ impl Index {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Drop an item's rows (entity, tags, links, tasks) but keep its doc registered.
+    pub fn remove_item(&mut self, id: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let tasks: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT id FROM entities WHERE tracker = ?1")?;
+            let rows = stmt.query_map(params![id], |r| r.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for task in tasks {
+            delete_entity(&tx, &task)?;
+        }
+        delete_entity(&tx, id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn upsert_item(&mut self, item: &ItemRecord, device: &str, ts: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
