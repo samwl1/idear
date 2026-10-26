@@ -30,6 +30,10 @@ Pins follow your account: a pin made on one of your devices shows on the others,
 the devices of people you share with. Right-click a pin to keep it **on this device only**
 instead; those show a small mark.
 
+**Check workspace** (on the Activity page) compares the sidebar's index with the workspace layout
+and every signed change with the doc it belongs to, and offers **Rebuild index** when the sidebar
+is what's wrong. A page that shows in the sidebar but can't be opened is the sign.
+
 **Links to pages**: type `[[` in a note and pick a page, or use **Insert → Link to a page**. A
 plain click opens it. The link follows the page, not its name, so renaming the page doesn't break
 it (the link text stays as written). Linked pages show under References on both ends. In

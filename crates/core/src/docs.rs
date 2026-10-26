@@ -97,37 +97,44 @@ impl DocStore {
         Ok(Some(self.get(id)?))
     }
 
-    /// Add changes this store doesn't have yet. `accept` sees each one; if it
-    /// refuses any, nothing is added. Creates the doc if it doesn't exist.
-    /// Returns how many changes were added, or the refused hashes.
+    /// Add changes this store doesn't have yet. `accept` sees each one, with
+    /// the doc as it stands once everything kept before it is applied, so it
+    /// can judge the change by what it does and not only by its hash; a
+    /// refused change takes anything built on it down with it. Creates the
+    /// doc if it doesn't exist. Returns how many changes were added, and the
+    /// refused hashes.
     pub fn import_changes(
         &mut self,
         id: &str,
         added: Vec<Change>,
-        accept: impl Fn(&Change) -> bool,
+        mut accept: impl FnMut(&Change, &Automerge) -> bool,
     ) -> Result<(usize, Vec<String>)> {
         let mut doc = match self.peek(id)? {
             Some(d) => d.clone(),
             None => Automerge::new(),
         };
         // Keep the accepted changes whose history is here or also accepted;
-        // a refused change takes anything built on it down with it.
+        // a refused change takes anything built on it down with it. Changes
+        // are judged in dependency order against a scratch copy that has the
+        // ones kept so far.
         let mut kept_hashes = std::collections::HashSet::new();
         let mut kept = Vec::new();
         let mut refused = Vec::new();
         let mut pending: Vec<Change> = added;
+        let mut scratch = doc.clone();
         loop {
             let before = kept.len();
             let mut rest = Vec::new();
             for c in pending {
                 let deps_ok = c.deps().iter().all(|d| kept_hashes.contains(d) || doc.get_change_by_hash(d).is_some());
-                if !accept(&c) {
-                    refused.push(c.hash().to_string());
-                } else if deps_ok {
-                    kept_hashes.insert(c.hash());
-                    kept.push(c);
-                } else {
+                if !deps_ok {
                     rest.push(c);
+                } else if !accept(&c, &scratch) {
+                    refused.push(c.hash().to_string());
+                } else {
+                    kept_hashes.insert(c.hash());
+                    scratch.apply_changes(vec![c.clone()])?;
+                    kept.push(c);
                 }
             }
             pending = rest;

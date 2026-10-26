@@ -286,6 +286,18 @@ export interface EventView {
   hash: string;
 }
 
+/** What checking a workspace found: the index against the layout, and events against docs. */
+export interface CheckReport {
+  ok: boolean;
+  docs: number;
+  /** In the sidebar's index but not the layout: ghosts. Rebuilding the index removes them. */
+  indexOnly: string[];
+  /** In the layout but not the index. Rebuilding adds them. */
+  layoutOnly: string[];
+  /** Trusted events whose change isn't in the doc they name. */
+  unapplied: string[];
+}
+
 export interface VerifyReport {
   ok: boolean;
   events: number;
@@ -369,6 +381,8 @@ export const api = {
     invoke<EventView[]>("list_events", { workspaceId, limit, offset }),
 
   verifyLog: (workspaceId: string) => invoke<VerifyReport>("verify_log", { workspaceId }),
+  checkWorkspace: (workspaceId: string) => invoke<CheckReport>("check_workspace", { workspaceId }),
+  repairIndex: (workspaceId: string) => invoke<number>("repair_index", { workspaceId }),
 
   shareInfo: (workspaceId: string) => invoke<ShareInfo>("share_info", { workspaceId }),
   createInvite: (workspaceId: string, role: "editor" | "viewer", label: string, hours: number, approve: boolean, passphrase: boolean) =>

@@ -321,6 +321,19 @@ pub async fn list_events(
     })
 }
 
+/// Compare the sidebar index, the layout, and the vouched changes.
+#[tauri::command]
+pub async fn check_workspace(state: State<'_, AppState>, workspace_id: String) -> CmdResult<notes_core::workspace::CheckReport> {
+    with_ws(&state, &workspace_id, |ws, _| ws.check())
+}
+
+/// Rebuild the sidebar and search index from the docs. Returns how many docs were indexed.
+#[tauri::command]
+pub async fn repair_index(state: State<'_, AppState>, workspace_id: String) -> CmdResult<usize> {
+    let me = device_hex(&state.key);
+    with_ws(&state, &workspace_id, |ws, _| ws.repair_index(&me))
+}
+
 #[tauri::command]
 pub async fn verify_log(state: State<'_, AppState>, workspace_id: String) -> CmdResult<VerifyReport> {
     with_ws(&state, &workspace_id, |ws, _| ws.verify_log())
@@ -413,8 +426,10 @@ pub async fn git_info(path: String) -> CmdResult<GitInfo> {
 }
 
 #[tauri::command]
+/// Whether a folder exists. Only folders: this is for linked repositories,
+/// and shouldn't double as a way to probe for files.
 pub async fn path_exists(path: String) -> CmdResult<bool> {
-    Ok(PathBuf::from(path).exists())
+    Ok(PathBuf::from(path).is_dir())
 }
 
 #[derive(Serialize)]

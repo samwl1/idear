@@ -231,9 +231,9 @@ pub fn seal_with(sender: &SigningKey, bundle: &Bundle, passphrase: &str) -> Resu
     header.push(VERSION_PASS);
     header.extend_from_slice(&sender.verifying_key().to_bytes());
     let plain = Zeroizing::new(serde_json::to_vec(bundle)?);
-    // seal_with_passphrase binds nothing to the header; the bundle inside
-    // names its sender, and open_pass checks that against the header.
-    let sealed = crate::identity::seal_with_passphrase(&plain, passphrase)?;
+    // The header is bound to the ciphertext, like the other formats; the
+    // bundle inside also names its sender, and open_pass checks the two agree.
+    let sealed = crate::identity::seal_with_passphrase_bound(&plain, passphrase, &header)?;
     let mut out = header;
     out.extend_from_slice(&sealed);
     Ok(out)
@@ -246,7 +246,11 @@ pub fn needs_passphrase(bytes: &[u8]) -> bool {
 
 fn open_pass(bytes: &[u8], passphrase: &str) -> Result<Bundle> {
     let header = &bytes[..HEADER_LEN];
-    let plain = crate::identity::open_with_passphrase(&bytes[HEADER_LEN..], passphrase, "update file")?;
+    let sealed = &bytes[HEADER_LEN..];
+    // Files from before the header was bound carry no AAD; the identity
+    // check below still ties their header to their contents.
+    let plain = crate::identity::open_with_passphrase_bound(sealed, passphrase, "update file", header)
+        .or_else(|e| crate::identity::open_with_passphrase(sealed, passphrase, "update file").map_err(|_| e))?;
     let bundle: Bundle = serde_json::from_slice(&plain)?;
     if bundle.identity.user != hex::encode(&header[9..HEADER_LEN]) {
         return Err(CoreError::Invalid("The update file's identity records don't match its header.".into()));

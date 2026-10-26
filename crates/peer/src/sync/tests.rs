@@ -103,27 +103,38 @@ fn names(c: &SyncCtx) -> Vec<String> {
     notes_core::list_workspaces(&c.root).unwrap().into_iter().map(|w| w.name).collect()
 }
 
-/// Change the workspace name from this device's copy, logged as an ordinary
-/// edit. Renaming the workspace itself ("workspace.rename") is the owner's
-/// alone; these tests use the name field as a stand-in for any edit.
+/// An ordinary edit from this device's copy: title the folder "f" in the
+/// layout (adding it the first time). Renaming the workspace itself is the
+/// owner's alone and checked by content, so a folder title stands in for
+/// any edit; `name_of` reads it back.
 fn rename(c: &SyncCtx, id: &str, to: &str) {
     c.open.lock().unwrap().remove(id);
     let mut ws = Workspace::open(&c.root, id).unwrap();
     let mut m = AutoCommit::load(&ws.load_doc("manifest").unwrap()).unwrap();
-    let t = match m.get(ROOT, "name").unwrap() {
+    let nodes = match m.get(ROOT, "nodes").unwrap() {
         Some((_, id)) => id,
         None => panic!(),
     };
-    let len = m.text(&t).unwrap().chars().count();
-    m.splice_text(&t, 0, len as isize, to).unwrap();
+    let n = match m.get(&nodes, "f").unwrap() {
+        Some((_, n)) => n,
+        None => {
+            let n = m.put_object(&nodes, "f", ObjType::Map).unwrap();
+            m.put(&n, "kind", "folder").unwrap();
+            m.put(&n, "order", "a0").unwrap();
+            n
+        }
+    };
+    m.put(&n, "title", to).unwrap();
     m.commit();
     let change = m.get_last_local_change().unwrap().raw_bytes().to_vec();
-    ws.apply_change(&c.device, "manifest", change, "tree.rename", Some(id)).unwrap();
+    ws.apply_change(&c.device, "manifest", change, "tree.rename", Some("f")).unwrap();
 }
 
+/// The title `rename` set, or the workspace's name before any edit.
 fn name_of(c: &SyncCtx, id: &str) -> String {
     c.open.lock().unwrap().remove(id);
-    Workspace::open(&c.root, id).unwrap().name().unwrap()
+    let ws = Workspace::open(&c.root, id).unwrap();
+    ws.title_of("f").unwrap().unwrap_or_else(|| ws.name().unwrap())
 }
 
 fn role_of(c: &SyncCtx, id: &str, user: &str) -> Option<Role> {

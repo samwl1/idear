@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { TreeNode } from "../lib/api";
 import { ancestors, useTree } from "../lib/useTree";
 import type { DropRef, ItemKind, WorkspaceSession } from "../lib/session";
@@ -391,7 +391,9 @@ function Row(p: RowProps) {
       data-drop={p.drop ?? undefined}
       data-missing={p.node.missing || undefined}
       title={p.node.missing ? "Waiting for this page to arrive from the device it was made on" : undefined}
-      style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem` }}
+      // --indent puts the drop line where a page dropped before or after this
+      // row lands: at this row's depth.
+      style={{ paddingLeft: `${0.25 + p.depth * 0.875}rem`, "--indent": `${0.25 + p.depth * 0.875}rem` } as CSSProperties}
       draggable={canEdit && !p.renaming}
       onContextMenu={p.onContextMenu}
       onDragStart={p.onDragStart}

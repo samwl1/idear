@@ -87,6 +87,12 @@ impl DeviceCert {
         Ok(Self { user: user_id, device: device_id, name: name.to_string(), issued, sig })
     }
 
+    /// The same, for a device known only by its id (re-certifying a folded
+    /// account's devices under the account that took it over).
+    pub fn issue_by_id(user: &SigningKey, device: &str, name: &str) -> Result<Self> {
+        Self::issue(user, &verifying_key(device)?, name)
+    }
+
     pub fn is_valid(&self) -> bool {
         let f = CertFields { user: &self.user, device: &self.device, name: &self.name, issued: self.issued };
         verify(&self.user, "device-cert", &f, &self.sig)
@@ -111,7 +117,13 @@ struct RevokeFields<'a> {
 
 impl Revocation {
     pub fn issue(user: &SigningKey, device: &str) -> Result<Self> {
-        let (user_id, revoked) = (key_id(&user.verifying_key()), now_ms());
+        Self::issue_at(user, device, now_ms())
+    }
+
+    /// A revocation dated `revoked`: for carrying one over to the account
+    /// that took this one over, keeping where the device's history ends.
+    pub fn issue_at(user: &SigningKey, device: &str, revoked: i64) -> Result<Self> {
+        let user_id = key_id(&user.verifying_key());
         let sig = sign(user, "revocation", &RevokeFields { user: &user_id, device, revoked })?;
         Ok(Self { user: user_id, device: device.to_string(), revoked, sig })
     }
@@ -238,10 +250,13 @@ impl BoxKey {
 
 /// One account folding into another, signed by both: `from` agrees to be
 /// succeeded, `to` agrees to take over. Everything `from` was (owner of a
-/// workspace, editor in another) is read as `to` from then on, and every
-/// change `from`'s devices ever signed stays valid under `from`'s own
-/// certificates. Linking two devices that each have history makes one of
-/// these; either device can be the one that joins.
+/// workspace, editor in another) is read as `to` from then on. `to`
+/// re-certifies `from`'s devices as its own, so every change they ever
+/// signed stays valid, while `from`'s own key stops counting for new
+/// devices: whoever still holds it can't add a device to the account with
+/// it. An account folds into another once; later claims are ignored.
+/// Linking two devices that each have history makes one of these; either
+/// device can be the one that joins.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Succession {
@@ -507,6 +522,13 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; 32]>> {
 /// Seal `plain` under a passphrase: Argon2id key, XChaCha20-Poly1305.
 /// Output is salt (16) + nonce (24) + ciphertext.
 pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
+    seal_with_passphrase_bound(plain, passphrase, &[])
+}
+
+/// `seal_with_passphrase` with `aad` bound to the ciphertext: anything kept
+/// in the clear next to it (a file header) that must not be swapped.
+pub fn seal_with_passphrase_bound(plain: &[u8], passphrase: &str, aad: &[u8]) -> Result<Vec<u8>> {
+    use chacha20poly1305::aead::Payload;
     let mut salt = [0u8; 16];
     let mut nonce = [0u8; 24];
     getrandom::getrandom(&mut salt).map_err(|e| CoreError::Invalid(e.to_string()))?;
@@ -514,7 +536,7 @@ pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
     let key = derive_key(passphrase, &salt)?;
     let cipher = XChaCha20Poly1305::new(key.as_ref().into());
     let sealed = cipher
-        .encrypt(XNonce::from_slice(&nonce), plain)
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad })
         .map_err(|_| CoreError::Invalid("encryption failed".into()))?;
     let mut out = Vec::with_capacity(16 + 24 + sealed.len());
     out.extend_from_slice(&salt);
@@ -525,6 +547,12 @@ pub fn seal_with_passphrase(plain: &[u8], passphrase: &str) -> Result<Vec<u8>> {
 
 /// The inverse of `seal_with_passphrase`. `what` names the thing for the error.
 pub fn open_with_passphrase(bytes: &[u8], passphrase: &str, what: &str) -> Result<Zeroizing<Vec<u8>>> {
+    open_with_passphrase_bound(bytes, passphrase, what, &[])
+}
+
+/// The inverse of `seal_with_passphrase_bound`.
+pub fn open_with_passphrase_bound(bytes: &[u8], passphrase: &str, what: &str, aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    use chacha20poly1305::aead::Payload;
     if bytes.len() < 16 + 24 + 16 {
         return Err(CoreError::Invalid(format!("The {what} is damaged or incomplete.")));
     }
@@ -533,7 +561,7 @@ pub fn open_with_passphrase(bytes: &[u8], passphrase: &str, what: &str) -> Resul
     let key = derive_key(passphrase, salt)?;
     Ok(Zeroizing::new(
         XChaCha20Poly1305::new(key.as_ref().into())
-            .decrypt(XNonce::from_slice(nonce), sealed)
+            .decrypt(XNonce::from_slice(nonce), Payload { msg: sealed, aad })
             .map_err(|_| CoreError::Invalid(format!("Wrong passphrase, or the {what} was changed.")))?,
     ))
 }
