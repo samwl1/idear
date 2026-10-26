@@ -32,9 +32,22 @@ pub fn list_workspaces(root: &Path) -> Result<Vec<WorkspaceInfo>> {
         if !entry.path().join("events.db").exists() || validate_id(&id).is_err() {
             continue;
         }
-        // One damaged folder must not hide every other workspace.
-        let Ok(ws) = Workspace::open(root, &id) else { continue };
-        let Ok(name) = ws.name() else { continue };
+        // One damaged folder must not hide every other workspace, but say
+        // which one was skipped and why, or it just looks lost.
+        let ws = match Workspace::open(root, &id) {
+            Ok(ws) => ws,
+            Err(e) => {
+                eprintln!("Couldn't open workspace {id}: {e}");
+                continue;
+            }
+        };
+        let name = match ws.name() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Couldn't read the name of workspace {id}: {e}");
+                continue;
+            }
+        };
         out.push(WorkspaceInfo { name, id });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -503,7 +516,7 @@ mod sync_files {
 
     fn unpack(s: &Setup, root: &std::path::Path, bytes: &[u8], ids: &IdentityState, me: &SigningKey) -> WorkspaceImport {
         let b = bundle::open(&s.user, bytes, None).unwrap();
-        let trusted = |d: &str, ts: i64, _: &str| ids.trusted_at(d, ts);
+        let trusted = |d: &str, ts: i64, _: &str, _: &str| ids.trusted_at(d, ts);
         Workspace::import(root, &b.workspaces[0], None, &trusted, &key_id(&me.verifying_key())).unwrap()
     }
 
@@ -603,7 +616,7 @@ mod sync_files {
     fn live_sync_sends_only_whats_missing() {
         let s = setup();
         let (ra, rb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let trusted = |d: &str, ts: i64, _: &str| s.ids.trusted_at(d, ts);
+        let trusted = |d: &str, ts: i64, _: &str, _: &str| s.ids.trusted_at(d, ts);
         let b_id = key_id(&s.b.verifying_key());
 
         let mut m = manifest_with("W");
@@ -659,6 +672,11 @@ mod sync_files {
         assert!(bundle::open(&key(9), &pass, None).err().is_some_and(|e| e.to_string().contains("passphrase")));
         assert!(bundle::open(&key(9), &pass, Some("wrong")).is_err());
         assert_eq!(bundle::open(&key(9), &pass, Some("CORRECT HORSE")).unwrap().identity.user, b.identity.user);
+        // The header (the sender) is bound to the ciphertext: swapping a byte
+        // of it fails to open even with the right passphrase.
+        let mut swapped = pass.clone();
+        swapped[12] ^= 1;
+        assert!(bundle::open(&key(9), &swapped, Some("correct horse")).is_err(), "a changed header is detected");
         let mut bad = file.clone();
         let i = bad.len() - 5;
         bad[i] ^= 1;
@@ -747,6 +765,31 @@ mod sharing {
         rename_as(root, dev, to, "tree.rename");
     }
 
+    /// An ordinary edit from a member's copy: give folder `id` a title,
+    /// adding the folder to the layout if it isn't there yet.
+    fn retitle(root: &std::path::Path, dev: &SigningKey, id: &str, title: &str) {
+        let mut ws = Workspace::open(root, "w").unwrap();
+        let mut m = AutoCommit::load(&ws.load_doc("manifest").unwrap()).unwrap();
+        let nodes = match m.get(ROOT, "nodes").unwrap() { Some((_, id)) => id, None => panic!() };
+        let n = match m.get(&nodes, id).unwrap() {
+            Some((_, n)) => n,
+            None => {
+                let n = m.put_object(&nodes, id, ObjType::Map).unwrap();
+                m.put(&n, "kind", "folder").unwrap();
+                m.put(&n, "order", "a0").unwrap();
+                n
+            }
+        };
+        m.put(&n, "title", title).unwrap();
+        m.commit();
+        let c = m.get_last_local_change().unwrap().raw_bytes().to_vec();
+        ws.apply_change(dev, "manifest", c, "tree.rename", Some(id)).unwrap();
+    }
+
+    fn title(root: &std::path::Path, id: &str) -> Option<String> {
+        Workspace::open(root, "w").unwrap().title_of(id).unwrap()
+    }
+
     /// Send everything `from` has to `to`, as live sync would, trusting by `to`'s membership.
     fn send(from: &std::path::Path, to: &std::path::Path, own_to: &IdentityState, me: &SigningKey) -> WorkspaceImport {
         let mut src = Workspace::open(from, "w").unwrap();
@@ -757,7 +800,7 @@ mod sharing {
         if let Some(t) = &theirs {
             effective.merge(t).unwrap();
         }
-        let trusted = |d: &str, ts: i64, action: &str| effective.trusts_event(d, ts, action, own_to);
+        let trusted = |d: &str, ts: i64, action: &str, doc: &str| effective.trusts_event(d, ts, action, doc, own_to);
         Workspace::import(to, &bundle, theirs.as_ref(), &trusted, &key_id(&me.verifying_key())).unwrap()
     }
 
@@ -783,36 +826,45 @@ mod sharing {
         assert_eq!(m.role(&vid.user), Some(Role::Viewer));
 
         // Alex's edit reaches Sam.
-        rename(rx.path(), &xd, "Team (Alex)");
+        retitle(rx.path(), &xd, "f", "Plans (Alex)");
         let r = send(rx.path(), ro.path(), &oid, &od);
         assert!(r.problems.is_empty(), "{r:?}");
-        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team (Alex)");
+        assert_eq!(title(ro.path(), "f").as_deref(), Some("Plans (Alex)"));
 
-        // Alex renaming the workspace itself is the owner's call: refused, however it arrives.
+        // Sam renames the workspace; it reaches Alex.
+        rename_as(ro.path(), &od, "Team (Sam)", "workspace.rename");
+        let r = send(ro.path(), rx.path(), &xid, &xd);
+        assert!(r.problems.is_empty(), "{r:?}");
+        assert_eq!(Workspace::open(rx.path(), "w").unwrap().name().unwrap(), "Team (Sam)");
+
+        // Alex renaming the workspace itself is the owner's call: refused,
+        // however it arrives. Labelled as an ordinary edit, the change is
+        // caught by what it does; labelled as a rename, the event isn't
+        // trusted at all (and, as any refused event, breaks the chain after it).
+        rename(rx.path(), &xd, "Alex's team, quietly");
+        let r = send(rx.path(), ro.path(), &oid, &od);
+        assert!(r.problems.iter().any(|p| p.contains("rename the workspace")), "{r:?}");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team (Sam)");
         rename_as(rx.path(), &xd, "Alex's team", "workspace.rename");
         let r = send(rx.path(), ro.path(), &oid, &od);
         assert!(r.untrusted.contains(&key_id(&xd.verifying_key())), "{r:?}");
-        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team (Alex)");
-        // Sam's own rename goes through.
-        rename_as(ro.path(), &od, "Team", "workspace.rename");
-        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
-        rename(ro.path(), &od, "Team (Alex)");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team (Sam)");
 
         // Val's edit (a modified app could make one) is refused.
-        rename(rv.path(), &vd, "Team (Val)");
+        retitle(rv.path(), &vd, "f", "Plans (Val)");
         let r = send(rv.path(), ro.path(), &oid, &od);
         assert!(r.untrusted.contains(&key_id(&vd.verifying_key())), "{r:?}");
-        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team (Alex)");
+        assert_eq!(title(ro.path(), "f").as_deref(), Some("Plans (Alex)"));
 
         // Sam removes Alex. Alex's later edit is refused; the earlier one stands.
         let mut ws = Workspace::open(ro.path(), "w").unwrap();
         ws.update_members(|m| m.set_role(&owner, &xid, Role::Removed, None)).unwrap();
         drop(ws);
         std::thread::sleep(std::time::Duration::from_millis(5));
-        rename(rx.path(), &xd, "Alex was here");
+        retitle(rx.path(), &xd, "f", "Alex was here");
         let r = send(rx.path(), ro.path(), &oid, &od);
         assert!(r.untrusted.contains(&key_id(&xd.verifying_key())));
-        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team (Alex)");
+        assert_eq!(title(ro.path(), "f").as_deref(), Some("Plans (Alex)"));
 
         // A newcomer receiving everything later still gets Alex's earlier edit.
         let (_, nd, nid) = person(4, 14, "Nia");
@@ -822,7 +874,8 @@ mod sharing {
         let rn = tempfile::tempdir().unwrap();
         let r = send(ro.path(), rn.path(), &nid, &nd);
         assert!(r.problems.is_empty(), "{r:?}");
-        assert_eq!(Workspace::open(rn.path(), "w").unwrap().name().unwrap(), "Team (Alex)");
+        assert_eq!(title(rn.path(), "f").as_deref(), Some("Plans (Alex)"));
+        assert_eq!(Workspace::open(rn.path(), "w").unwrap().name().unwrap(), "Team (Sam)");
     }
 
     #[test]
@@ -842,7 +895,7 @@ mod sharing {
         assert!(send(ro.path(), rv.path(), &vid, &vd).created);
 
         // Sam's later edit must still count on Val's copy, and on anyone's.
-        rename(ro.path(), &od, "Team (Sam)");
+        rename_as(ro.path(), &od, "Team (Sam)", "workspace.rename");
         let r = send(ro.path(), rv.path(), &vid, &vd);
         assert!(!r.untrusted.contains(&od_id), "{r:?}");
         assert!(r.problems.is_empty(), "{r:?}");
@@ -852,7 +905,7 @@ mod sharing {
         assert!(m.device_has_access(&od_id, &vid));
         assert_eq!(m.device_user(&od_id, now_ms(), &vid).map(|i| i.user.clone()), Some(oid.user.clone()));
         // Val's own device gets no edit rights from the extra certificate.
-        assert!(!m.trusts_event(&key_id(&vd.verifying_key()), now_ms(), "tree.rename", &vid));
+        assert!(!m.trusts_event(&key_id(&vd.verifying_key()), now_ms(), "tree.rename", "manifest", &vid));
     }
 
     #[test]
@@ -876,11 +929,87 @@ mod sharing {
         forged.commit();
         let raw = forged.get_last_local_change().unwrap().raw_bytes().to_vec();
         // Slip the change into the doc without any event vouching for it.
-        theirs.docs.import_changes("manifest", vec![automerge::Change::from_bytes(raw).unwrap()], |_| true).unwrap();
+        theirs.docs.import_changes("manifest", vec![automerge::Change::from_bytes(raw).unwrap()], |_, _| true).unwrap();
         drop(theirs);
 
         let r = send(rv.path(), ro.path(), &oid, &od);
         assert!(r.problems.iter().any(|p| p.contains("workspace layout")), "{r:?}");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
+    }
+
+    #[test]
+    fn a_private_event_cannot_vouch_for_a_shared_doc() {
+        // A viewer may log private.* events (their own pins). One of those
+        // events naming a layout change as its "change" must not let that
+        // change in: a vouched hash only counts for the doc the event names,
+        // and private events only for the signer's own private doc.
+        let (owner, od, oid) = person(1, 11, "Sam");
+        let (_, vd, vid) = person(3, 13, "Val");
+        let (ro, rv) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut ws = Workspace::create(ro.path(), "w", &manifest().save(), &od).unwrap();
+        ws.ensure_members(&oid).unwrap();
+        ws.update_members(|m| m.set_role(&owner, &vid, Role::Viewer, None)).unwrap();
+        drop(ws);
+        assert!(send(ro.path(), rv.path(), &vid, &vd).created);
+
+        let mut theirs = Workspace::open(rv.path(), "w").unwrap();
+        let mut forged = AutoCommit::new();
+        let t = forged.put_object(ROOT, "name", ObjType::Text).unwrap();
+        forged.splice_text(&t, 0, 0, "Pwned").unwrap();
+        forged.put_object(ROOT, "nodes", ObjType::Map).unwrap();
+        forged.commit();
+        let change = forged.get_last_local_change().unwrap();
+        let hash = change.hash().to_string();
+        theirs
+            .docs
+            .import_changes("manifest", vec![automerge::Change::from_bytes(change.raw_bytes().to_vec()).unwrap()], |_, _| true)
+            .unwrap();
+        // Three shapes of a forged voucher: a private event naming the
+        // manifest, a private event naming Val's own pins doc, and a private
+        // event naming the owner's pins doc.
+        let pins = workspace::private_doc_id(&vid.user);
+        for doc in ["manifest", pins.as_str(), &workspace::private_doc_id(&oid.user)] {
+            theirs
+                .log_event(&vd, "private.edit", doc, serde_json::json!({ "doc": doc, "kind": "private", "change": hash }))
+                .unwrap();
+        }
+        drop(theirs);
+
+        let r = send(rv.path(), ro.path(), &oid, &od);
+        assert!(r.problems.iter().any(|p| p.contains("workspace layout")), "{r:?}");
+        assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
+    }
+
+    #[test]
+    fn only_the_owner_creates_or_renames_a_workspace() {
+        // An editor forges a "workspace.create" event whose heads name a
+        // change that renames the workspace. Creation vouches for a name, so
+        // it must be the owner's alone, like renaming.
+        let (owner, od, oid) = person(1, 11, "Sam");
+        let (_, xd, xid) = person(2, 12, "Alex");
+        let (ro, rx) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut ws = Workspace::create(ro.path(), "w", &manifest().save(), &od).unwrap();
+        ws.ensure_members(&oid).unwrap();
+        ws.update_members(|m| m.set_role(&owner, &xid, Role::Editor, None)).unwrap();
+        drop(ws);
+        assert!(send(ro.path(), rx.path(), &xid, &xd).created);
+
+        let mut theirs = Workspace::open(rx.path(), "w").unwrap();
+        let mut m = AutoCommit::load(&theirs.load_doc("manifest").unwrap()).unwrap();
+        let t = match m.get(ROOT, "name").unwrap() { Some((_, id)) => id, None => panic!() };
+        m.splice_text(&t, 0, 4, "Pwned").unwrap();
+        m.commit();
+        let change = m.get_last_local_change().unwrap();
+        let hash = change.hash().to_string();
+        theirs
+            .docs
+            .import_changes("manifest", vec![automerge::Change::from_bytes(change.raw_bytes().to_vec()).unwrap()], |_, _| true)
+            .unwrap();
+        theirs.log_event(&xd, "workspace.create", "w", serde_json::json!({ "name": "Pwned", "heads": [hash] })).unwrap();
+        drop(theirs);
+
+        let r = send(rx.path(), ro.path(), &oid, &od);
+        assert!(r.untrusted.contains(&key_id(&xd.verifying_key())), "{r:?}");
         assert_eq!(Workspace::open(ro.path(), "w").unwrap().name().unwrap(), "Team");
     }
 
@@ -897,7 +1026,7 @@ mod sharing {
         theirs.ensure_members(&xid).unwrap();
         let bundle = theirs.export(true).unwrap();
         let m = theirs.members().cloned();
-        let trusted = |_: &str, _: i64, _: &str| true;
+        let trusted = |_: &str, _: i64, _: &str, _: &str| true;
         assert!(Workspace::import(ro.path(), &bundle, m.as_ref(), &trusted, "me").is_err());
     }
 }

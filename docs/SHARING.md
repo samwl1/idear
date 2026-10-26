@@ -141,7 +141,9 @@ from **Settings → Devices**.
 - **Linking folds accounts together.** Adding a device that already has workspaces to another
   account folds its old account into the new one: a succession record signed by both keys says
   "this account is now that one". Its workspaces, memberships, and history read as the new
-  account's, and its other devices are told to link too. Succession can't be undone.
+  account's, and its other devices are told to link too. The old key is retired by it: it can't
+  add devices to the account any more, so linking to a fresh account is also how you recover from
+  a device you've lost. Succession can't be undone.
 - **Update files aren't signed as a whole.** Every change inside is verified, but the "From" line
   shows the identity written in the file, which whoever made the file chose.
 - **Views belong to the workspace**, so everyone sees the same saved views and only editors can

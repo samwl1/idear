@@ -197,8 +197,11 @@ impl InviteRecord {
 
 /// Actions only the workspace's owner may take, however they arrive: renaming
 /// the workspace. Editors can change everything inside it, not what it's called.
+/// Actions only the owner's devices may log. Creation vouches for the first
+/// layout and its name, and marks older workspaces' first import; renaming
+/// is the owner's alone. Anyone else logging either is refused.
 pub fn owner_only(action: &str) -> bool {
-    action == "workspace.rename"
+    action == "workspace.rename" || action == "workspace.create"
 }
 
 pub fn hash_secret(secret: &[u8]) -> String {
@@ -283,23 +286,74 @@ impl Members {
             .filter(|(u, s)| &s.user == u)
             .map(|(u, s)| (u, s.validated()))
             .collect();
+        self.prune_successions();
         let (ws, owners) = (self.workspace.clone(), self.owner_keys());
         self.records.retain(|r| r.is_valid_any(&ws, &owners));
         self.invites.retain(|id, i| &i.id == id && i.is_valid_any(&ws, &owners));
         self.sort();
+        self.prune_identities();
         self
     }
 
+    /// Drop identities of accounts that were never part of the workspace.
+    /// Anyone's copy can name any number of them; only those with a role
+    /// (past or present), or folded into one that has, are worth keeping and
+    /// consulting on every check.
+    fn prune_identities(&mut self) {
+        let keep: Vec<String> = self
+            .identities
+            .values()
+            .filter(|ids| self.role(&ids.user).is_some() || ids.predecessors.iter().any(|p| self.role(&p.from).is_some()))
+            .map(|ids| ids.user.clone())
+            .collect();
+        self.identities.retain(|u, _| keep.contains(u));
+    }
+
     // ---- successions ----------------------------------------------------------------
+
+    /// The account `user` was folded into, if any. An account folds into one
+    /// other account exactly once; see `prune_successions`.
+    pub fn succeeded_by(&self, user: &str) -> Option<&IdentityState> {
+        self.identities.values().find(|i| i.user != user && i.predecessors.iter().any(|p| p.from == user))
+    }
+
+    /// Whether `user`'s key no longer speaks for anyone: its account was folded
+    /// into another. Its certificates stop counting from then on (the account
+    /// it folded into re-certifies its devices), so whoever still holds the
+    /// old key can't add devices to the new account with it. Its revocations
+    /// and the history its devices wrote stay.
+    pub fn is_superseded(&self, user: &str) -> bool {
+        self.succeeded_by(user).is_some()
+    }
+
+    /// Keep one succession per folded account. Two identities both claiming
+    /// to have taken over the same account would make roles ambiguous and let
+    /// a leaked old key hand the account to someone else; `merge` keeps the
+    /// one already known, and a copy read fresh keeps the earliest.
+    fn prune_successions(&mut self) {
+        let mut seen: BTreeMap<String, (i64, String)> = BTreeMap::new();
+        for ids in self.identities.values() {
+            for p in &ids.predecessors {
+                let e = seen.entry(p.from.clone()).or_insert((p.at, ids.user.clone()));
+                if (p.at, &ids.user) < (e.0, &e.1) {
+                    *e = (p.at, ids.user.clone());
+                }
+            }
+        }
+        for ids in self.identities.values_mut() {
+            let user = ids.user.clone();
+            ids.predecessors.retain(|p| seen.get(&p.from).is_none_or(|(_, to)| to == &user));
+        }
+    }
 
     /// The account `user` is read as today: itself, or whatever account it was
     /// folded into (following a chain, if it was folded more than once).
     pub fn canon(&self, user: &str) -> String {
         let mut cur = user.to_string();
         for _ in 0..16 {
-            match self.identities.values().find(|i| i.predecessors.iter().any(|p| p.from == cur)) {
-                Some(next) if next.user != cur => cur = next.user.clone(),
-                _ => break,
+            match self.succeeded_by(&cur) {
+                Some(next) => cur = next.user.clone(),
+                None => break,
             }
         }
         cur
@@ -325,7 +379,7 @@ impl Members {
         let mut out = vec![self.owner.clone()];
         for _ in 0..16 {
             let last = out.last().cloned().expect("non-empty");
-            match self.identities.values().find(|i| i.predecessors.iter().any(|p| p.from == last)) {
+            match self.succeeded_by(&last) {
                 Some(next) if !out.contains(&next.user) => out.push(next.user.clone()),
                 _ => break,
             }
@@ -352,14 +406,7 @@ impl Members {
             if &ids.user != user {
                 continue;
             }
-            match self.identities.get_mut(user) {
-                Some(cur) => {
-                    cur.merge(ids);
-                }
-                None => {
-                    self.identities.insert(user.clone(), ids.clone().validated());
-                }
-            }
+            self.merge_identity(ids);
         }
         let (ws, owners) = (self.workspace.clone(), self.owner_keys());
         for r in &other.records {
@@ -376,6 +423,7 @@ impl Members {
             }
         }
         self.sort();
+        self.prune_identities();
         Ok(*self != before)
     }
 
@@ -386,13 +434,36 @@ impl Members {
         if !part {
             return false;
         }
-        match self.identities.get_mut(&ids.user) {
-            Some(cur) => cur.merge(ids),
+        self.merge_identity(ids)
+    }
+
+    /// Fold in one identity. Successions already known win over ones that
+    /// disagree with them, and an account that was folded into another takes
+    /// no new certificates: only its revocations and its own successors.
+    fn merge_identity(&mut self, ids: &IdentityState) -> bool {
+        let mut ids = ids.clone().validated();
+        ids.predecessors.retain(|p| self.succeeded_by(&p.from).is_none_or(|to| to.user == ids.user));
+        let superseded = self.is_superseded(&ids.user);
+        let changed = match self.identities.get_mut(&ids.user) {
+            Some(cur) if superseded => {
+                let mut frozen = cur.clone();
+                frozen.revocations = ids.revocations.clone();
+                frozen.successors = ids.successors.clone();
+                frozen.predecessors = ids.predecessors.clone();
+                cur.merge(&frozen)
+            }
+            Some(cur) => cur.merge(&ids),
             None => {
-                self.identities.insert(ids.user.clone(), ids.clone().validated());
+                if superseded {
+                    ids.certs.clear();
+                    ids.addresses.clear();
+                }
+                self.identities.insert(ids.user.clone(), ids);
                 true
             }
-        }
+        };
+        self.prune_successions();
+        changed
     }
 
     pub fn is_shared(&self) -> bool {
@@ -433,7 +504,7 @@ impl Members {
     fn device_users<'a>(&'a self, device: &'a str, own: &'a IdentityState) -> impl Iterator<Item = &'a IdentityState> + 'a {
         std::iter::once(own)
             .chain(self.identities.values().filter(move |ids| ids.user != own.user))
-            .filter(move |ids| ids.certs.contains_key(device))
+            .filter(move |ids| ids.certs.contains_key(device) && !self.is_superseded(&ids.user))
     }
 
     /// The user an event from `device` is attributed to: the first identity
@@ -446,21 +517,41 @@ impl Members {
     }
 
     /// Whether an event signed by `device` at `ts` counts in this workspace.
-    /// `action` is the event's action: a few are the owner's alone.
-    pub fn trusts_event(&self, device: &str, ts: i64, action: &str, own: &IdentityState) -> bool {
+    /// `action` is the event's action: a few are the owner's alone. `doc` is
+    /// the doc the event is about (empty for membership events).
+    pub fn trusts_event(&self, device: &str, ts: i64, action: &str, doc: &str, own: &IdentityState) -> bool {
         // Private docs (pins and the like) are each member's own and never
-        // leave their devices, so viewers may log changes to them too. The
-        // docs themselves only travel between a member's own devices.
+        // leave their devices, so viewers may log changes to them too, but
+        // only to their own private doc: a `private.*` event vouching for
+        // anything else would let a viewer change what everyone sees.
         if action.starts_with("private.") {
-            return self
-                .device_users(device, own)
-                .any(|ids| ids.trusted_at(device, ts) && self.role(&ids.user).is_some_and(Role::has_access));
+            return crate::workspace::is_private_doc(doc)
+                && self.device_users(device, own).any(|ids| {
+                    ids.trusted_at(device, ts)
+                        && self.role(&ids.user).is_some_and(Role::has_access)
+                        && self.owns_private_doc(&ids.user, doc)
+                });
+        }
+        // Shared docs are never touched through private.* events, and
+        // private docs never through anything else.
+        if crate::workspace::is_private_doc(doc) {
+            return false;
         }
         self.device_users(device, own).any(|ids| {
             ids.trusted_at(device, ts)
                 && self.could_edit_at(&ids.user, ts)
                 && (!owner_only(action) || self.is_owner(&ids.user))
         })
+    }
+
+    /// Whether private doc `doc` is `user`'s: named after their key, or after
+    /// the key of any account folded into theirs (pins made before linking).
+    fn owns_private_doc(&self, user: &str, doc: &str) -> bool {
+        crate::workspace::private_doc_id(user) == doc
+            || self
+                .identities
+                .keys()
+                .any(|u| crate::workspace::private_doc_id(u) == doc && self.same_account(u, user))
     }
 
     /// Whether a device may sync this workspace right now: it belongs to
@@ -557,12 +648,23 @@ impl Members {
         out
     }
 
+    /// What a stranger is told when an invite is unknown or its secret is
+    /// wrong: the same thing either way, so guessing ids learns nothing.
+    pub const BAD_INVITE: &str = "That invite link isn't valid.";
+
     /// Check an invite presented by someone who wants to join.
     pub fn check_invite(&self, id: &str, secret: &[u8], now: i64) -> Result<&InviteRecord> {
-        let invite = self.invites.get(id).ok_or_else(|| CoreError::Invalid("That invite doesn't exist.".into()))?;
+        let invite = self.invites.get(id).ok_or_else(|| CoreError::Invalid(Self::BAD_INVITE.into()))?;
         if invite.secret_hash != hash_secret(secret) {
-            return Err(CoreError::Invalid("That invite's secret doesn't match.".into()));
+            return Err(CoreError::Invalid(Self::BAD_INVITE.into()));
         }
+        self.check_invite_open(id, now)
+    }
+
+    /// Whether an invite can still be redeemed, secret aside: for deciding on
+    /// a request that was checked (secret and all) when it was held.
+    pub fn check_invite_open(&self, id: &str, now: i64) -> Result<&InviteRecord> {
+        let invite = self.invites.get(id).ok_or_else(|| CoreError::Invalid(Self::BAD_INVITE.into()))?;
         if invite.cancelled {
             return Err(CoreError::Invalid("That invite was cancelled.".into()));
         }
@@ -742,6 +844,61 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_account_cannot_add_devices_any_more() {
+        use crate::identity::Succession;
+        let (owner, _od, oid) = person(1, 11, "Sam");
+        let (alex1, ad1, aid1) = person(2, 12, "Alex");
+        let mut m = Members::new("w", &oid);
+        m.set_role(&owner, &aid1, Role::Editor, None).unwrap();
+        let laptop = key_id(&ad1.verifying_key());
+
+        // Alex's phone takes the account over; the laptop is re-certified
+        // under the new key, as linking does.
+        let (alex2, ad2, mut aid2) = person(3, 13, "Alex");
+        aid2.predecessors.push(Succession::issue(&alex1, &alex2).unwrap());
+        aid2.certs.insert(laptop.clone(), DeviceCert::issue_by_id(&alex2, &laptop, "laptop").unwrap());
+        assert!(m.learn_identity(&aid2));
+        assert!(m.is_superseded(&aid1.user));
+        assert!(m.device_has_access(&laptop, &oid), "re-certified devices keep working");
+        assert!(m.device_has_access(&key_id(&ad2.verifying_key()), &oid));
+        assert!(m.trusts_event(&laptop, now_ms(), "note.edit", "n", &oid));
+
+        // Someone who kept the old key certifies a new device with it. The
+        // old account can't add devices any more, so it gets nothing.
+        let thief = key(14);
+        let thief_dev = key_id(&thief.verifying_key());
+        let mut stale = aid1.clone();
+        stale.certs.insert(thief_dev.clone(), DeviceCert::issue(&alex1, &thief.verifying_key(), "stolen").unwrap());
+        m.learn_identity(&stale);
+        assert!(!m.device_has_access(&thief_dev, &oid), "a folded account's key adds no devices");
+        assert!(!m.trusts_event(&thief_dev, now_ms(), "note.edit", "n", &oid));
+        // Not through a whole membership copy either.
+        let mut other = m.clone();
+        other.identities.insert(aid1.user.clone(), stale.clone());
+        m.merge(&other).unwrap();
+        assert!(!m.device_has_access(&thief_dev, &oid));
+        // The old key's revocations still count: removing the laptop under
+        // the old account is honoured (the new account would re-revoke too).
+        let mut revoked = aid1.clone();
+        revoked.revocations.insert(laptop.clone(), crate::identity::Revocation::issue(&alex1, &laptop).unwrap());
+        m.learn_identity(&revoked);
+        assert!(m.identities[&aid1.user].revocations.contains_key(&laptop));
+
+        // Nor can the old key hand the account to a second successor.
+        let (mal, _, mut mid) = person(6, 16, "Mal");
+        mid.predecessors.push(Succession::issue(&alex1, &mal).unwrap());
+        m.learn_identity(&mid);
+        assert!(m.role(&mid.user).is_none(), "a second succession from the same account is ignored");
+        assert_eq!(m.canon(&aid1.user), aid2.user);
+        // A copy read fresh with both claims keeps the earlier one.
+        let mut both = m.clone();
+        both.identities.insert(mid.user.clone(), mid.clone());
+        let both = serde_json::from_slice::<Members>(&serde_json::to_vec(&both).unwrap()).unwrap().validated();
+        assert_eq!(both.canon(&aid1.user), aid2.user);
+        assert!(both.role(&mid.user).is_none());
+    }
+
+    #[test]
     fn roles_over_time() {
         let (owner, od, oid) = person(1, 11, "Sam");
         let (_, xd, xid) = person(2, 12, "Alex");
@@ -749,23 +906,23 @@ mod tests {
         let x_dev = key_id(&xd.verifying_key());
 
         assert_eq!(m.role(&oid.user), Some(Role::Owner));
-        assert!(m.trusts_event(&key_id(&od.verifying_key()), 0, "note.edit", &oid));
-        assert!(!m.trusts_event(&x_dev, 0, "note.edit", &oid), "strangers can't edit");
+        assert!(m.trusts_event(&key_id(&od.verifying_key()), 0, "note.edit", "", &oid));
+        assert!(!m.trusts_event(&x_dev, 0, "note.edit", "", &oid), "strangers can't edit");
 
         let added = m.set_role(&owner, &xid, Role::Viewer, None).unwrap();
         assert_eq!(m.role(&xid.user), Some(Role::Viewer));
         assert!(m.device_has_access(&x_dev, &oid));
-        assert!(!m.trusts_event(&x_dev, added.issued + 10, "note.edit", &oid), "viewers can't edit");
+        assert!(!m.trusts_event(&x_dev, added.issued + 10, "note.edit", "", &oid), "viewers can't edit");
 
         let promoted = m.set_role(&owner, &xid, Role::Editor, None).unwrap();
-        assert!(m.trusts_event(&x_dev, promoted.issued + 10, "note.edit", &oid));
-        assert!(!m.trusts_event(&x_dev, promoted.issued + 10, "workspace.rename", &oid), "editors can't rename");
-        assert!(m.trusts_event(&key_id(&od.verifying_key()), promoted.issued + 10, "workspace.rename", &oid));
+        assert!(m.trusts_event(&x_dev, promoted.issued + 10, "note.edit", "", &oid));
+        assert!(!m.trusts_event(&x_dev, promoted.issued + 10, "workspace.rename", "", &oid), "editors can't rename");
+        assert!(m.trusts_event(&key_id(&od.verifying_key()), promoted.issued + 10, "workspace.rename", "", &oid));
 
         let removed = m.set_role(&owner, &xid, Role::Removed, None).unwrap();
         assert!(!m.device_has_access(&x_dev, &oid));
-        assert!(m.trusts_event(&x_dev, removed.issued - 1, "note.edit", &oid), "edits from before removal stand");
-        assert!(!m.trusts_event(&x_dev, removed.issued + 1, "note.edit", &oid), "edits after removal don't");
+        assert!(m.trusts_event(&x_dev, removed.issued - 1, "note.edit", "", &oid), "edits from before removal stand");
+        assert!(!m.trusts_event(&x_dev, removed.issued + 1, "note.edit", "", &oid), "edits after removal don't");
 
         let people = m.people();
         assert_eq!(people.len(), 2);

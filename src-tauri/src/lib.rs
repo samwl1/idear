@@ -35,7 +35,7 @@ pub fn run() {
         .setup(|app| {
             let data = app.path().app_data_dir()?;
             let root = data.join("workspaces");
-            std::fs::create_dir_all(&root)?;
+            notes_peer::create_private_dir(&data)?;
             let key = keychain::APP.load_or_create(keychain::DEVICE_KEY)?;
             let account = match account::Account::open(
                 data.join("identity.json"),

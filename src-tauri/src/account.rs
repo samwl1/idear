@@ -227,6 +227,21 @@ pub async fn join_with_code(state: State<'_, AppState>, code: String, passphrase
             if !next.predecessors.iter().any(|p| p.from == succession.from) {
                 next.predecessors.push(succession);
             }
+            // The old account's other devices become this account's: once the
+            // succession is known, the old key's certificates stop counting,
+            // so what those devices signed stays valid only through these.
+            // Devices the old account removed come over removed, as of the
+            // same moment, so the history they wrote before still counts.
+            for (id, c) in &a.state.certs {
+                if !next.certs.contains_key(id) {
+                    next.certs.insert(id.clone(), DeviceCert::issue_by_id(&user, id, &c.name).map_err(|e| e.to_string())?);
+                }
+            }
+            for (id, r) in &a.state.revocations {
+                if !next.revocations.contains_key(id) && next.certs.contains_key(id) {
+                    next.revocations.insert(id.clone(), Revocation::issue_at(&user, id, r.revoked).map_err(|e| e.to_string())?);
+                }
+            }
         }
         // Records first, then the key: if the save fails the keychain still
         // matches the records on disk, and the join can simply be retried. A

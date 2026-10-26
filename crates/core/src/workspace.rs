@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::docs::{get_bool, get_i64, get_map, get_map_list, get_string, get_string_list, root, DocStore};
 use crate::error::{CoreError, Result};
 use crate::bundle::{DocBundle, WorkspaceBundle};
-use crate::eventlog::{Event, EventLog, VerifyReport};
+use crate::eventlog::{Event, EventLog, Trusted, VerifyReport};
 use crate::identity::IdentityState;
 use crate::members::Members;
 use crate::index::{HubRow, Index, ItemRecord, Links, NodeRecord, TaskRecord, TreeNode, ViewQuery, ViewRow};
@@ -77,7 +77,7 @@ pub const PRIVATE: &str = "private";
 
 /// The id of `user`'s private doc in a workspace.
 pub fn private_doc_id(user: &str) -> String {
-    format!("{PRIVATE}-{}", &user[..user.len().min(48)])
+    format!("{PRIVATE}-{}", user.get(..48).unwrap_or(user))
 }
 
 /// Whether `id` is some member's private doc.
@@ -193,7 +193,7 @@ impl Workspace {
         root_dir: &Path,
         wb: &WorkspaceBundle,
         members: Option<&Members>,
-        trusted: &dyn Fn(&str, i64, &str) -> bool,
+        trusted: &Trusted,
         device: &str,
     ) -> Result<WorkspaceImport> {
         validate_id(&wb.id)?;
@@ -226,7 +226,7 @@ impl Workspace {
         dir: &Path,
         wb: &WorkspaceBundle,
         members: Option<&Members>,
-        trusted: &dyn Fn(&str, i64, &str) -> bool,
+        trusted: &Trusted,
         device: &str,
         created: bool,
     ) -> Result<WorkspaceImport> {
@@ -273,8 +273,20 @@ impl Workspace {
             // word; once there is one, every change needs a signed event, or
             // any member could put a whole new tree at the root.
             let legacy_root = is_manifest && attested.legacy_create && ws.docs.peek(&d.id)?.is_none();
-            let accept = |c: &automerge::Change| {
-                attested.hashes.contains(&c.hash().to_string()) || (legacy_root && c.deps().is_empty())
+            let mut renamed = false;
+            let accept = |c: &automerge::Change, so_far: &automerge::Automerge| {
+                let hash = c.hash().to_string();
+                if !(attested.vouches(&d.id, &hash) || (legacy_root && c.deps().is_empty())) {
+                    return false;
+                }
+                // Only the owner names the workspace. The event's label says
+                // what a change claims to be; this checks what it does, so an
+                // editor's "tree.rename" can't rename the workspace itself.
+                if is_manifest && !attested.allows_rename(&hash) && changes_name(so_far, c) {
+                    renamed = true;
+                    return false;
+                }
+                true
             };
             let imported = match ws.docs.import_changes(&d.id, incoming, accept) {
                 Ok(r) => r,
@@ -293,10 +305,11 @@ impl Workspace {
             }
             if !refused.is_empty() {
                 report.problems.push(format!(
-                    "skipped changes to {}: {} change{} not signed by anyone allowed to edit",
+                    "skipped changes to {}: {} change{} not signed by anyone allowed to {}",
                     if is_manifest { "the workspace layout".to_string() } else { format!("a {}", d.kind) },
                     refused.len(),
                     if refused.len() == 1 { " was" } else { "s were" },
+                    if renamed { "rename the workspace" } else { "edit" },
                 ));
             }
         }
@@ -328,7 +341,7 @@ impl Workspace {
             id: id.to_string(),
             docs: DocStore::open(&dir.join("docs"))?,
             index: Index::open(&dir.join("index.sqlite"))?,
-            log: EventLog::open(&dir.join("events.db"))?,
+            log: EventLog::open(&dir.join("events.db"), id)?,
             members,
             dir,
         })
@@ -719,6 +732,18 @@ impl Workspace {
         }
         Ok(())
     }
+}
+
+/// Whether applying `change` to `doc` would change the workspace's name. A
+/// doc with no name yet (the first layout) may be given one.
+fn changes_name(doc: &automerge::Automerge, change: &automerge::Change) -> bool {
+    let r = root();
+    let Ok(Some(before)) = get_string(doc, &r, "name") else { return false };
+    let mut after = doc.clone();
+    if after.apply_changes(vec![change.clone()]).is_err() {
+        return true;
+    }
+    get_string(&after, &r, "name").ok().flatten() != Some(before)
 }
 
 /// Phase id to name.
