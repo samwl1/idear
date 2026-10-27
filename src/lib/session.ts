@@ -149,6 +149,19 @@ export type PrivateDoc = {
 /** A pin as stored in the private doc: a Pin without device-only scope. */
 export type PrivatePin = Record<string, string>;
 
+/**
+ * A fresh private doc. Every device seeds it the same way (fixed actor, no
+ * timestamp), so two devices that start it apart produce the same first
+ * change and their pins merge instead of competing for the root. Later
+ * changes carry this device's own actor.
+ */
+function seedPrivate(): A.Doc<PrivateDoc> {
+  const seed = A.change(A.init<PrivateDoc>({ actor: "00000000000000000000000000000001" }), { time: 0, message: "" }, (d) => {
+    d.pins = [];
+  });
+  return A.clone(seed);
+}
+
 export class WorkspaceSession {
   /** This account's user key, set once at startup; private docs are named by it. */
   static user: string | null = null;
@@ -211,11 +224,39 @@ export class WorkspaceSession {
     try {
       this.privateDoc = A.load<PrivateDoc>(await api.loadDoc(this.id, id));
     } catch {
-      const doc = A.from<PrivateDoc>({ pins: [] });
+      const doc = seedPrivate();
       await this.enqueue(() => api.createDoc(this.id, id, "private", A.save(doc), "private.create"));
       this.privateDoc = doc;
     }
+    await this.healPins();
     return this.privateDoc;
+  }
+
+  /**
+   * Docs made before the seed was fixed were started separately on each
+   * device, so when they merge, Automerge keeps one device's pin list at the
+   * root and hides the others. Copy the hidden pins into the visible list;
+   * every device picks the same winner, so they all end up agreeing.
+   */
+  private async healPins(): Promise<void> {
+    const doc = this.privateDoc;
+    if (!doc) return;
+    const conflicts = A.getConflicts(doc, "pins");
+    if (!conflicts || Object.keys(conflicts).length < 2) return;
+    const key = (p: PrivatePin) => `${p.kind}:${p.id ?? ""}`;
+    const have = new Set(doc.pins.map(key));
+    const lost: PrivatePin[] = [];
+    for (const list of Object.values(conflicts)) {
+      if (!Array.isArray(list)) continue;
+      for (const p of list as PrivatePin[]) {
+        if (!have.has(key(p))) {
+          have.add(key(p));
+          lost.push({ ...p });
+        }
+      }
+    }
+    if (!lost.length) return;
+    await this.changePrivate((d) => lost.forEach((p) => d.pins.push(p)));
   }
 
   /** The private doc if it's loaded; otherwise null (see loadPrivate). */
