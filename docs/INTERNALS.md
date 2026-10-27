@@ -69,7 +69,11 @@ from another device.
   from a generated passphrase, for a device whose key you don't have yet. The app asks for the
   passphrase when it opens one. What's inside is still checked change by change, so the
   passphrase only controls who can read the file, never what counts.
-- **Private docs** (pins) go only in files for your own devices.
+- **Private docs** (pins) go only in files for your own devices. Every device seeds a new one
+  identically (a fixed actor, no timestamp), so two devices that start it before they've synced
+  produce the same first change and merge cleanly. Docs from before that healed themselves: when
+  a merge leaves competing pin lists at the root, the app copies the hidden pins into the visible
+  one.
 - The header (format version and identities) is authenticated, in passphrase files too.
 - On import, every event must verify, come from a device allowed to change that workspace at the
   time (see [Sharing](SHARING.md#how-it-works)), name this workspace (events carry the id of the
