@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useTheme } from "../lib/prefs";
-import { CaptureUpdateAction, Excalidraw, newElementWith } from "@excalidraw/excalidraw";
+import { CaptureUpdateAction, Excalidraw, newElementWith, restoreElements } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
@@ -175,6 +175,34 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
       timer.current = setTimeout(() => flushRef.current(), 400);
     }
   };
+
+  // Text is measured when the scene is built, which is usually before the
+  // handwriting fonts have arrived: Excalidraw fetches them on demand, per
+  // character range, once it mounts. When they land it repaints but keeps the
+  // widths measured with the fallback font, so text runs past its box and is
+  // clipped until something re-measures it (editing it does). Re-measure
+  // every text element whenever fonts finish loading.
+  useEffect(() => {
+    if (!excalidraw) return;
+    let live = true;
+    const remeasure = () => {
+      if (!live) return;
+      const all = excalidraw.getSceneElementsIncludingDeleted();
+      if (!all.some((e) => e.type === "text" && !e.isDeleted)) return;
+      excalidraw.updateScene({
+        // Versions are kept, so nothing is saved until the element is next edited.
+        elements: restoreElements(all, null, { refreshDimensions: true, repairBindings: true }),
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+    };
+    document.fonts.addEventListener("loadingdone", remeasure);
+    // Fonts that loaded between building the scene and mounting.
+    document.fonts.ready.then(remeasure, () => {});
+    return () => {
+      live = false;
+      document.fonts.removeEventListener("loadingdone", remeasure);
+    };
+  }, [excalidraw]);
 
   // Keep card labels in step with the items they link to.
   useEffect(() => {
