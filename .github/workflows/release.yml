@@ -1,0 +1,92 @@
+# Builds the desktop app and attaches it to a GitHub release.
+#
+# Cut a release by pushing a version tag:
+#   git tag v1.1.0 && git push origin v1.1.0
+# The tag must match the version in src-tauri/tauri.conf.json (and package.json,
+# src-tauri/Cargo.toml). "Run workflow" on the Actions tab builds the current
+# branch into a draft release instead, for trying a build without tagging.
+#
+# macOS builds are signed and notarized when the APPLE_* secrets are set (an
+# Apple Developer account); without them they're unsigned and Gatekeeper makes
+# people clear the quarantine flag once (see the release notes).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --target universal-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - os: ubuntu-22.04
+            args: ""
+            targets: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libdbus-1-dev build-essential \
+            libssl-dev librsvg2-dev libgtk-3-dev libayatana-appindicator3-dev patchelf
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional macOS signing. Leave unset for unsigned builds.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'untagged-build' }}
+          releaseName: ${{ github.ref_type == 'tag' && format('idear {0}', github.ref_name) || 'Untagged build' }}
+          releaseBody: |
+            ## Install
+
+            **macOS** (Apple Silicon and Intel, one download): open the `.dmg` and drag idear to Applications.
+            The build isn't notarized yet, so the first launch needs one extra step: right-click the app,
+            choose **Open**, and confirm. If macOS says the app is damaged instead, run
+            `xattr -cr /Applications/idear.app` once in Terminal, then open it normally.
+
+            **Linux**: the `.AppImage` runs anywhere (`chmod +x` it first); the `.deb` is for Debian and
+            Ubuntu, the `.rpm` for Fedora. Live sync and device linking keep your keys in the system
+            keyring, so a running Secret Service (GNOME Keyring or KWallet) is needed.
+
+            **Windows**: not yet.
+
+            Your data lives in your own app folder and syncs only between your own devices and the people
+            you invite. See the [docs](https://github.com/samwl1/idear/tree/main/docs) for sharing, update
+            files, and connecting Claude.
+          releaseDraft: ${{ github.ref_type != 'tag' }}
+          prerelease: false
+          args: ${{ matrix.args }}
