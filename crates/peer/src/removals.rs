@@ -77,6 +77,18 @@ fn move_dir(from: &Path, to: &Path) -> Res<()> {
     std::fs::rename(from, to).map_err(|e| format!("Couldn't move {}: {e}", from.display()))
 }
 
+/// Workspace ids are folder names under `workspaces/` and `trash/`. Anything
+/// else (`..`, a path) must never be joined onto those and moved or deleted.
+/// The same rule the core uses for ids.
+fn validate_id(id: &str) -> Res<()> {
+    let ok = !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err("That isn't a workspace id.".into())
+    }
+}
+
 /// A deleted workspace, for the trash list.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +109,7 @@ impl SyncCtx {
     /// Move a workspace to the trash on this device, and on your other
     /// devices at their next sync.
     pub fn delete_workspace(&self, id: &str, name: &str) -> Res<()> {
+        validate_id(id)?;
         let _f = FILE.lock().map_err(|_| "removals lock poisoned")?;
         let dir = self.root.join(id);
         if !dir.exists() {
@@ -113,6 +126,7 @@ impl SyncCtx {
 
     /// Bring a workspace back from the trash.
     pub fn restore_workspace(&self, id: &str) -> Res<()> {
+        validate_id(id)?;
         let _f = FILE.lock().map_err(|_| "removals lock poisoned")?;
         let from = trash_dir(&self.root).join(id);
         let to = self.root.join(id);
@@ -132,6 +146,7 @@ impl SyncCtx {
     /// Empty one workspace out of the trash. The tombstone stays, so your
     /// other devices still drop their copies.
     pub fn purge_workspace(&self, id: &str) -> Res<()> {
+        validate_id(id)?;
         let _f = FILE.lock().map_err(|_| "removals lock poisoned")?;
         let dir = trash_dir(&self.root).join(id);
         if dir.exists() {
@@ -194,7 +209,7 @@ impl SyncCtx {
         let mut changed = false;
         for (id, r) in theirs {
             // Ids are folder names: never follow anything that could leave the data folder.
-            if id.is_empty() || id.contains(['/', '\\', '.']) {
+            if validate_id(id).is_err() {
                 continue;
             }
             if ours.get(id).is_some_and(|o| o.at >= r.at) {
@@ -217,5 +232,49 @@ impl SyncCtx {
             save(&self.root, &ours)?;
         }
         Ok((deleted, restored))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::Account;
+    use crate::sync::{Approvals, Joins};
+    use ed25519_dalek::SigningKey;
+    use notes_core::identity::IdentityState;
+    use std::sync::Arc;
+
+    fn ctx(dir: &Path) -> SyncCtx {
+        std::fs::create_dir_all(dir.join("workspaces")).unwrap();
+        let user = SigningKey::from_bytes(&[1; 32]);
+        let state = IdentityState::new(&user.verifying_key());
+        SyncCtx {
+            root: dir.join("workspaces"),
+            device: SigningKey::from_bytes(&[2; 32]),
+            account: Arc::new(Mutex::new(Account { user, state, path: dir.join("identity.json") })),
+            open: Default::default(),
+            joins: Arc::new(Joins::load(dir.join("joins.json"))),
+            approvals: Arc::new(Approvals::load(dir.join("approvals.json"))),
+        }
+    }
+
+    /// The id comes straight from the frontend. `..` under `trash/` is the
+    /// data folder itself.
+    #[test]
+    fn ids_that_leave_the_trash_are_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let c = ctx(t.path());
+        std::fs::create_dir_all(trash_dir(&c.root).join("w1")).unwrap();
+        std::fs::write(t.path().join("identity.json"), b"{}").unwrap();
+        for id in ["..", ".", "", "../workspaces", "a/b", "a\\b", "/tmp"] {
+            assert!(c.purge_workspace(id).is_err(), "{id:?}");
+            assert!(c.restore_workspace(id).is_err(), "{id:?}");
+            assert!(c.delete_workspace(id, "x").is_err(), "{id:?}");
+        }
+        assert!(t.path().join("identity.json").exists());
+        assert!(c.root.exists() && trash_dir(&c.root).join("w1").exists());
+        // A real id still works.
+        c.purge_workspace("w1").unwrap();
+        assert!(!trash_dir(&c.root).join("w1").exists());
     }
 }
