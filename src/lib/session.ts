@@ -173,6 +173,12 @@ export class WorkspaceSession {
   private editable = true;
   /** Bumped when another device changes a doc, so open editors reload it. */
   private remoteVersions = new Map<string, number>();
+  /**
+   * Where each doc stood just before a reload, by the version it had then.
+   * An editor opened on that version saves against these heads, not against
+   * the reloaded doc (see commit).
+   */
+  private branches = new Map<string, Map<number, A.Heads>>();
   /** Docs the tree lists but this device hasn't received; they reload when they arrive. */
   private missing = new Set<string>();
   /** This account's private doc (pins), once loaded. */
@@ -340,26 +346,44 @@ export class WorkspaceSession {
    */
   async applyRemote(docIds: string[]) {
     flushAll();
-    await this.queue;
     for (const id of docIds) {
-      try {
-        if (id === MANIFEST) {
-          this.manifest = A.load<Manifest>(await api.loadDoc(this.id, MANIFEST));
-        } else if (this.items.has(id)) {
-          this.items.set(id, A.load<ItemBase>(await api.loadDoc(this.id, id)));
-        } else if (this.missing.has(id)) {
-          this.missing.delete(id); // the page's next load fetches it
-        } else if (id === this.privateId && this.privateDoc) {
-          this.privateDoc = A.load<PrivateDoc>(await api.loadDoc(this.id, id));
-        } else {
-          continue;
+      // Each reload takes its turn in the write queue: a save made while the
+      // doc is being read either lands first and is in what's read, or runs
+      // after and is applied to the reloaded doc. Nothing slips in between.
+      await this.enqueue(async () => {
+        try {
+          if (id === MANIFEST) {
+            this.manifest = A.load<Manifest>(await api.loadDoc(this.id, MANIFEST));
+          } else if (this.items.has(id)) {
+            const old = this.items.get(id) as A.Doc<ItemBase>;
+            this.items.set(id, A.load<ItemBase>(await api.loadDoc(this.id, id)));
+            // Editors still open on the old text save against where it stood.
+            let byVersion = this.branches.get(id);
+            if (!byVersion) this.branches.set(id, (byVersion = new Map()));
+            byVersion.set(this.remoteVersion(id), A.getHeads(old));
+          } else if (this.missing.has(id)) {
+            this.missing.delete(id); // the page's next load fetches it
+          } else if (id === this.privateId && this.privateDoc) {
+            this.privateDoc = A.load<PrivateDoc>(await api.loadDoc(this.id, id));
+          } else {
+            return;
+          }
+          this.remoteVersions.set(id, this.remoteVersion(id) + 1);
+        } catch (err) {
+          console.error("Couldn't reload", id, err);
         }
-        this.remoteVersions.set(id, this.remoteVersion(id) + 1);
-      } catch (err) {
-        console.error("Couldn't reload", id, err);
-      }
+      });
     }
     this.emit();
+  }
+
+  /** Resolves once every write made so far has reached Rust (or failed). */
+  async settled(): Promise<void> {
+    let seen: Promise<unknown>;
+    do {
+      seen = this.queue;
+      await seen;
+    } while (seen !== this.queue);
   }
 
   // ---- write plumbing -------------------------------------------------------
@@ -380,17 +404,41 @@ export class WorkspaceSession {
     subject?: string,
     /** The private doc is yours whatever your role. */
     private_ = false,
+    /** The doc's remoteVersion when the editor making this change read it. */
+    base?: number,
   ): Promise<void> {
     if (!this.editable && !private_) return Promise.reject(new Error(READ_ONLY));
     return this.enqueue(async () => {
       const before = get();
-      const after = A.change(before, fn);
-      if (A.getHeads(after).join() === A.getHeads(before).join()) return; // no-op
-      const change = A.getLastLocalChange(after);
-      if (!change) return;
+      let after: A.Doc<T>;
+      let change: A.Change | undefined;
+      // For a stale editor: where its next save starts from, once this one is stored.
+      let branch: A.Heads | null = null;
+      if (base !== undefined && base !== this.remoteVersion(docId)) {
+        // The doc was reloaded with another device's changes after this
+        // editor read it, so its text doesn't have them. Writing that text
+        // over the reloaded doc would delete them. Make the change on a copy
+        // of the doc as this editor knew it instead, and merge that in, so
+        // both sides' edits are kept. (A.changeAt would say the same thing,
+        // but it misplaces updateText's edits.)
+        const heads = this.branches.get(docId)?.get(base);
+        if (!heads) throw new Error("This page changed on another device; reopen it to keep editing.");
+        const fork = A.change(A.clone(A.view(before, heads)), fn);
+        branch = A.getHeads(fork);
+        if (branch.join() === heads.join()) return; // no-op
+        change = A.getLastLocalChange(fork);
+        if (!change) return;
+        after = A.applyChanges(before, [change])[0];
+      } else {
+        after = A.change(before, fn);
+        if (A.getHeads(after).join() === A.getHeads(before).join()) return; // no-op
+        change = A.getLastLocalChange(after);
+        if (!change) return;
+      }
       set(after);
       try {
         await api.applyChange(this.id, docId, change, action, subject);
+        if (branch && base !== undefined) this.branches.get(docId)?.set(base, branch);
       } catch (err) {
         set(A.load<T>(await api.loadDoc(this.id, docId)));
         this.emit();
@@ -420,12 +468,15 @@ export class WorkspaceSession {
    * `verb` is rename / edit / tag; the action is logged as `<kind>.<verb>`.
    * `opts.action` overrides the whole action, and `opts.subject` names what the
    * change is about (e.g. a task inside a project) for the activity log.
+   * `opts.base` is the item's `remoteVersion` when the caller read the text
+   * it's saving: if another device's changes were merged in since, the change
+   * is made against what the caller saw, so both sides' edits are kept.
    */
   changeItem<T extends ItemBase>(
     id: string,
     verb: string,
     fn: A.ChangeFn<T>,
-    opts: { action?: string; subject?: string } = {},
+    opts: { action?: string; subject?: string; base?: number } = {},
   ) {
     const kind = this.node(id)?.kind ?? "note";
     return this.commit<T>(
@@ -439,6 +490,8 @@ export class WorkspaceSession {
       opts.action ?? `${kind}.${verb}`,
       fn,
       opts.subject,
+      false,
+      opts.base,
     );
   }
 
