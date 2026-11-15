@@ -37,7 +37,8 @@ const SAFE_COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\))$/i;
 /**
  * Tab indents instead of leaving the editor: a list item nests under the one
  * above (Shift+Tab lifts it), a code block gets two spaces, and anywhere else
- * a tab character goes in.
+ * a tab character goes in. In a table the keys are left to the table, which
+ * moves to the next or previous cell; this runs first, so it has to step aside.
  */
 const TabKey = Extension.create({
   name: "tabKey",
@@ -45,6 +46,7 @@ const TabKey = Extension.create({
   addKeyboardShortcuts() {
     return {
       Tab: ({ editor }) => {
+        if (editor.isActive("table")) return false;
         if (editor.isActive("codeBlock")) return editor.commands.insertContent("  ");
         // A list item nests under the one above it. The first item of a list
         // has nothing to nest under (the document model can't hold a deeper
@@ -58,6 +60,7 @@ const TabKey = Extension.create({
         return editor.commands.insertContent("\t");
       },
       "Shift-Tab": ({ editor }) => {
+        if (editor.isActive("table")) return false;
         // Take back a tab or two spaces before the cursor; otherwise lift the list item.
         const { from } = editor.state.selection;
         const before = editor.state.doc.textBetween(Math.max(0, from - 2), from, "\n");
