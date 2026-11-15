@@ -76,12 +76,19 @@ export function Tree({ session, selectedId, onOpen, onError, onOpenWorkspace }: 
     };
   }, [dragId]);
 
-  // Show the open page, even when it's nested inside collapsed pages or folders.
+  // Show the open page, even when it's nested inside collapsed pages or
+  // folders: when another page is opened, and when the open one first turns
+  // up in the tree (on load, or once it syncs). Not on every refresh of the
+  // tree, which follows each save: that would reopen a folder collapsed
+  // around the open page a moment after every keystroke.
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
+  const selectedListed = !!selectedId && byId.has(selectedId);
   useEffect(() => {
-    if (!selectedId) return;
-    const up = ancestors(tree, selectedId).map((n) => n.id);
+    if (!selectedId || !selectedListed) return;
+    const up = ancestors(treeRef.current, selectedId).map((n) => n.id);
     if (up.length) setExpanded((s) => (up.every((id) => s.has(id)) ? s : new Set([...s, ...up])));
-  }, [selectedId, tree]);
+  }, [selectedId, selectedListed]);
 
   const hasKids = (id: string) => (children.get(id)?.length ?? 0) > 0;
   const pins = usePins(session.id);
