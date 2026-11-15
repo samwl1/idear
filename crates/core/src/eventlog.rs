@@ -294,6 +294,15 @@ impl EventLog {
                 continue;
             }
             let short = short_id(&e.device);
+            // Numbers start at 1 and have to fit the database. Anything else
+            // is refused on its own, here: left to fail further down it would
+            // take the whole batch with it, and the sender would offer the
+            // same batch again at every sync.
+            if e.seq == 0 || i64::try_from(e.seq).is_err() {
+                report.rejected += 1;
+                report.problems.push(format!("device {short} sent an event with an impossible number ({})", e.seq));
+                continue;
+            }
             let existing: Option<String> = tx
                 .query_row(
                     "SELECT hash FROM events WHERE device = ?1 AND seq = ?2",
@@ -332,15 +341,15 @@ impl EventLog {
                 report.problems.push(format!("device {short} event #{} failed its signature check", e.seq));
                 continue;
             }
-            let expected_prev: Option<String> = if e.seq == 1 {
-                None
-            } else {
-                tx.query_row(
-                    "SELECT hash FROM events WHERE device = ?1 AND seq = ?2",
-                    params![e.device, e.seq - 1],
-                    |r| r.get(0),
-                )
-                .optional()?
+            let expected_prev: Option<String> = match e.seq.checked_sub(1) {
+                None | Some(0) => None,
+                Some(before) => tx
+                    .query_row(
+                        "SELECT hash FROM events WHERE device = ?1 AND seq = ?2",
+                        params![e.device, before],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
             };
             if e.seq > 1 && expected_prev.is_none() {
                 report.rejected += 1;
@@ -623,6 +632,50 @@ mod tests {
         let mut other = open(dir.path(), "w2");
         let r = other.import(&[e], &|_, _, _, _| true).unwrap();
         assert_eq!(r.rejected, 1);
+    }
+
+    /// Sign `e` as `k`'s device would, whatever number it carries.
+    fn signed(k: &SigningKey, seq: u64, prev: Option<String>) -> Event {
+        let mut e = Event {
+            device: hex::encode(k.verifying_key().to_bytes()),
+            seq,
+            prev,
+            ts: 1,
+            action: "note.edit".into(),
+            target: "n".into(),
+            data: "{}".into(),
+            hash: String::new(),
+            sig: String::new(),
+            workspace: None,
+        };
+        let digest = canonical_hash(&e).unwrap();
+        e.hash = hex::encode(digest);
+        e.sig = hex::encode(k.sign(&digest).to_bytes());
+        e
+    }
+
+    /// Event numbers come from the sender. Zero used to underflow (a panic
+    /// in debug builds) and one past what the database holds failed the
+    /// whole import, so the honest events beside it never arrived.
+    #[test]
+    fn an_impossible_event_number_is_refused_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (bad, good) = (key(11), key(12));
+        let mut log = open(dir.path(), "w1");
+        let batch = [
+            signed(&bad, 0, None),
+            signed(&bad, u64::MAX, None),
+            signed(&bad, i64::MAX as u64 + 1, None),
+            signed(&good, 1, None),
+        ];
+        let r = log.import(&batch, &|_, _, _, _| true).unwrap();
+        assert_eq!((r.added, r.rejected), (1, 3), "{r:?}");
+        assert_eq!(r.problems.len(), 3, "{r:?}");
+        assert!(r.problems.iter().all(|p| p.contains("impossible number")), "{r:?}");
+        let all = log.all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].device, hex::encode(good.verifying_key().to_bytes()));
+        assert!(log.verify().unwrap().ok);
     }
 
     #[test]
