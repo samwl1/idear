@@ -324,6 +324,49 @@ mod tests {
         assert!(q(ViewQuery::default()).iter().all(|r| r.kind != "task"));
     }
 
+    /// The app archives a task by writing a timestamp, not a flag. Either
+    /// way it is done and reads as archived, wherever its column says.
+    #[test]
+    fn archived_tasks_are_done_however_it_was_written() {
+        use crate::index::ViewQuery;
+        let tmp = tempfile::tempdir().unwrap();
+        let k = key(8);
+        let mut ws = Workspace::create(tmp.path(), "ws", &manifest("T").save(), &k).unwrap();
+
+        let mut d = AutoCommit::new();
+        d.put(ROOT, "title", "Project").unwrap();
+        let cols = d.put_object(ROOT, "columns", ObjType::List).unwrap();
+        let c = d.insert_object(&cols, 0, ObjType::Map).unwrap();
+        d.put(&c, "id", "c1").unwrap();
+        d.put(&c, "name", "To do").unwrap();
+        d.put(&c, "order", "a0").unwrap();
+        d.put(&c, "category", "todo").unwrap();
+        let tasks = d.put_object(ROOT, "tasks", ObjType::Map).unwrap();
+        for id in ["open", "stamp", "float", "flag", "zero"] {
+            let task = d.put_object(&tasks, id, ObjType::Map).unwrap();
+            d.put(&task, "number", 1_i64).unwrap();
+            d.put(&task, "title", id).unwrap();
+            d.put(&task, "column", "c1").unwrap();
+            match id {
+                "stamp" => d.put(&task, "archived", 1_763_000_000_000_i64).unwrap(),
+                "float" => d.put(&task, "archived", 1_763_000_000_000_f64).unwrap(),
+                "flag" => d.put(&task, "archived", true).unwrap(),
+                "zero" => d.put(&task, "archived", 0_i64).unwrap(),
+                _ => {}
+            }
+        }
+        ws.create_doc(&k, "tr", "tracker", &d.save(), "tracker.create").unwrap();
+        list_in_layout(&mut ws, &k, "tr", "tracker");
+
+        let ids = |status: &str| {
+            let q = ViewQuery { types: vec!["task".into()], statuses: vec![status.into()], sort: "title".into(), ..Default::default() };
+            ws.query(&q).unwrap().into_iter().map(|r| (r.id, r.status.unwrap_or_default())).collect::<Vec<_>>()
+        };
+        let archived = |id: &str| (id.to_string(), "Archived".to_string());
+        assert_eq!(ids("done"), vec![archived("flag"), archived("float"), archived("stamp")]);
+        assert_eq!(ids("todo"), vec![("open".to_string(), "To do".to_string()), ("zero".to_string(), "To do".to_string())]);
+    }
+
     #[test]
     fn notes_hub_links_both_ways() {
         use crate::index::ViewQuery;

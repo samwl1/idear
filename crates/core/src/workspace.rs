@@ -811,7 +811,10 @@ fn read_tasks(doc: &automerge::Automerge, r: &automerge::ObjId) -> Result<Vec<Ta
             .cloned()
             .unwrap_or_else(|| (if column == "backlog" { "Backlog".into() } else { "".into() }, "todo".into()));
         // An archived task is done wherever it was, and off the board.
-        let archived = get_bool(doc, &t, "archived")?.unwrap_or(false);
+        // The app archives by writing the time it happened; a plain flag
+        // counts too.
+        let archived = get_i64(doc, &t, "archived")?.is_some_and(|a| a > 0)
+            || get_bool(doc, &t, "archived")?.unwrap_or(false);
         let (status, category) = if archived { ("Archived".to_string(), "done".to_string()) } else { (status, category) };
         let phase = get_string(doc, &t, "phase")?.and_then(|p| phases.get(&p).cloned()).unwrap_or_default();
         let number = get_i64(doc, &t, "number")?.unwrap_or(0);
