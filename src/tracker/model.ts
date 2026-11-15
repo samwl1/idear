@@ -345,6 +345,19 @@ function boundToPhase(d: TrackerDoc, taskId: string) {
   if (t.start && t.due && t.due < t.start) t.due = t.start;
 }
 
+/**
+ * A whole YYYY-MM-DD date in a year a plan could mean. A date field reports a
+ * half-typed year as a real date ("0002-05-01"), which must never be saved.
+ */
+export function isPlanDate(iso: string): boolean {
+  const m = /^(\d{4})-\d{2}-\d{2}$/.exec(iso);
+  if (!m) return false;
+  const year = Number(m[1]);
+  if (year < 1900 || year > 2200) return false;
+  const d = new Date(`${iso}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === iso;
+}
+
 /** A plain copy of a task for putting back into a doc; a column that no longer exists becomes the first. */
 function cloneTask(d: TrackerDoc, t: Task): Task {
   const task: Task = {
@@ -796,15 +809,30 @@ export class TrackerOps {
     });
   }
 
-  /** Set a phase's planned window. */
+  /**
+   * Set a phase's planned window. Only whole, believable dates get in, and an
+   * end before the start is refused rather than swapped. Tasks keep their own
+   * dates: moving the window never rewrites them (a task is only pulled into
+   * the window when its own dates or phase are next edited).
+   */
   setPhaseDates(phaseId: string, patch: { start?: string; end?: string }) {
+    for (const v of [patch.start, patch.end]) {
+      if (v !== undefined && v !== "" && !isPlanDate(v)) return Promise.reject(new Error(`"${v}" isn't a date a phase can use.`));
+    }
+    const cur = this.view().phases.find((p) => p.id === phaseId);
+    if (!cur) return Promise.resolve();
+    const start = patch.start ?? cur.start ?? "";
+    const end = patch.end ?? cur.end ?? "";
+    if (start && end && end < start) return Promise.reject(new Error("A phase can't end before it starts."));
     return this.change("phase.edit", this.id, (d) => {
       const p = d.phases[phaseId];
       if (!p) return;
-      if (patch.start !== undefined) p.start = patch.start;
-      if (patch.end !== undefined) p.end = patch.end;
-      if (p.start && p.end && p.end < p.start) [p.start, p.end] = [p.end, p.start];
-      for (const id of Object.keys(d.tasks ?? {})) if (d.tasks[id].phase === phaseId) boundToPhase(d, id);
+      // Checked again against the doc being written, in case it moved on since.
+      const s = patch.start ?? p.start ?? "";
+      const e = patch.end ?? p.end ?? "";
+      if (s && e && e < s) return;
+      if (patch.start !== undefined && p.start !== patch.start) p.start = patch.start;
+      if (patch.end !== undefined && p.end !== patch.end) p.end = patch.end;
     });
   }
 
