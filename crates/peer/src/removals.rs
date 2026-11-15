@@ -38,6 +38,12 @@ pub type Removals = BTreeMap<String, Removal>;
 /// One file per data folder; sync and commands both touch it.
 static FILE: Mutex<()> = Mutex::new(());
 
+/// Hold the removals file, as a delete in progress would.
+#[cfg(test)]
+pub(crate) fn hold_file() -> std::sync::MutexGuard<'static, ()> {
+    FILE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

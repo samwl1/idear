@@ -217,6 +217,45 @@ async fn deleting_a_workspace_reaches_your_other_devices() {
     assert_eq!(ca.merge_removals(&evil.into_iter().collect()).unwrap(), (vec![], vec![]));
 }
 
+/// Deleting takes the removals file and then the open workspaces. Applying
+/// a sync that brings in a new workspace needs both too, and must not sit
+/// on the open workspaces while it waits for the file, or the two deadlock.
+#[test]
+fn applying_never_waits_for_the_removals_file_holding_workspaces() {
+    let (user, a, b) = (key(1), key(2), key(3));
+    let mut ids = IdentityState::new(&user.verifying_key());
+    ids.certs.insert(key_id(&a.verifying_key()), DeviceCert::issue(&user, &a.verifying_key(), "A").unwrap());
+    ids.certs.insert(key_id(&b.verifying_key()), DeviceCert::issue(&user, &b.verifying_key(), "B").unwrap());
+    let (ra, rb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (ca, cb) = (ctx(ra.path(), &user, &a, &ids), ctx(rb.path(), &user, &b, &ids));
+    Workspace::create(&ca.root, "wa", &manifest("From A").save(), &a).unwrap();
+    let (bundle, _) = ca.export_bundle(&["wa".to_string()], None).unwrap();
+
+    // A delete is under way on B: it has the file and wants the workspaces next.
+    let file = crate::removals::hold_file();
+    let importer = {
+        let cb = cb.clone();
+        std::thread::spawn(move || cb.import_bundle(bundle).map(|r| r.applied.new_workspaces))
+    };
+    // Wait for the import to get as far as needing the file.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !cb.root.join("wa").join("events.db").exists() {
+        assert!(std::time::Instant::now() < deadline, "the import never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut free = false;
+    for _ in 0..200 {
+        if cb.open.try_lock().is_ok() {
+            free = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(free, "apply held the open workspaces while waiting for the removals file");
+    drop(file);
+    assert!(importer.join().unwrap().unwrap());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sharing_with_other_people() {
     let (sam_key, sam_dev, sam) = person(1, 11, "Sam");

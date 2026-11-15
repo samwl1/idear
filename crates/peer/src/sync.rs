@@ -664,6 +664,7 @@ impl SyncCtx {
         let own = self.own()?;
         let me = self.me();
         let mut applied = Applied::default();
+        let mut created = Vec::new();
         let mut open = self.open.lock().map_err(|_| "workspace lock poisoned")?;
 
         // Membership first, including for workspaces with no new content.
@@ -703,7 +704,7 @@ impl SyncCtx {
             };
             applied.new_workspaces |= r.created;
             if r.created {
-                self.mark_present(&r.id)?;
+                created.push(r.id.clone());
             }
             if r.members_changed {
                 applied.members_changed.insert(r.id.clone());
@@ -728,6 +729,13 @@ impl SyncCtx {
                     open.remove(&r.workspace);
                 }
             }
+        }
+        // Deleting a workspace takes the removals file and then the open
+        // workspaces. Taking them the other way round here could leave the
+        // two waiting on each other, so let go of the workspaces first.
+        drop(open);
+        for id in &created {
+            self.mark_present(id)?;
         }
         Ok(applied)
     }
