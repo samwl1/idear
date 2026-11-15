@@ -3,7 +3,7 @@ import { useTheme } from "../lib/prefs";
 import { CaptureUpdateAction, Excalidraw, newElementWith, restoreElements } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { AppState, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { A } from "../lib/automerge";
 import { useItemLookup } from "../lib/useItemLookup";
 import { registerFlush } from "../lib/pending";
@@ -141,7 +141,12 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
     };
   }, []);
 
-  const onChange = (elements: readonly ExcalidrawElement[]) => {
+  const onChange = (elements: readonly ExcalidrawElement[], appState: AppState) => {
+    // A font re-measure that was put off while text was being typed.
+    if (remeasureLater.current && !appState.editingTextElement) {
+      remeasureLater.current = false;
+      remeasureRef.current();
+    }
     if (!canEdit) return;
     const unsupported: string[] = [];
     let changed = false;
@@ -182,19 +187,38 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
   // widths measured with the fallback font, so text runs past its box and is
   // clipped until something re-measures it (editing it does). Re-measure
   // every text element whenever fonts finish loading.
+  const remeasureLater = useRef(false);
+  const remeasureRef = useRef(() => {});
   useEffect(() => {
-    if (!excalidraw) return;
+    if (!excalidraw || !document.fonts) return;
     let live = true;
     const remeasure = () => {
       if (!live) return;
+      // Not while text is being typed: the text box that opens on a click
+      // with the text tool, or on a double click to label a shape, is an
+      // element with no text yet, and restoring one of those deletes it.
+      // onChange runs this again once the typing is done.
+      if (excalidraw.getAppState().editingTextElement) {
+        remeasureLater.current = true;
+        return;
+      }
       const all = excalidraw.getSceneElementsIncludingDeleted();
       if (!all.some((e) => e.type === "text" && !e.isDeleted)) return;
+      const measured = new Map(
+        restoreElements(all, null, { refreshDimensions: true, repairBindings: true }).map((e) => [e.id, e]),
+      );
       excalidraw.updateScene({
-        // Versions are kept, so nothing is saved until the element is next edited.
-        elements: restoreElements(all, null, { refreshDimensions: true, repairBindings: true }),
+        // Only text that came back alive takes its new measurements; everything
+        // else stays as it is. Versions are kept, so nothing is saved until
+        // the element is next edited.
+        elements: all.map((e) => {
+          const m = measured.get(e.id);
+          return m && e.type === "text" && !e.isDeleted && !m.isDeleted ? m : e;
+        }),
         captureUpdate: CaptureUpdateAction.NEVER,
       });
     };
+    remeasureRef.current = remeasure;
     document.fonts.addEventListener("loadingdone", remeasure);
     // Fonts that loaded between building the scene and mounting.
     document.fonts.ready.then(remeasure, () => {});
