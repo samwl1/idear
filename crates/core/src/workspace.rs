@@ -58,6 +58,9 @@ pub struct WorkspaceImport {
     /// Membership (people, roles) changed.
     pub members_changed: bool,
     pub untrusted: std::collections::BTreeSet<String>,
+    /// The sender holds events signed by this device that contradict this
+    /// copy's own log (see `eventlog::FORKED`). Also among `problems`.
+    pub forked: bool,
     pub problems: Vec<String>,
 }
 
@@ -69,6 +72,9 @@ pub struct WorkspaceSummary {
     pub id: String,
     pub docs: std::collections::BTreeMap<String, Vec<String>>,
     pub seqs: std::collections::BTreeMap<String, u64>,
+    /// The hash of each device's latest event. Absent from older builds.
+    #[serde(default)]
+    pub tips: std::collections::BTreeMap<String, String>,
 }
 const ITEM_KINDS: &[&str] = &["note", "whiteboard", "tracker"];
 /// A doc that belongs to one member and syncs only between their own
@@ -141,7 +147,16 @@ impl Workspace {
                 docs.insert(id, doc.get_heads().iter().map(|h| h.to_string()).collect());
             }
         }
-        Ok(WorkspaceSummary { id: self.id.clone(), docs, seqs: self.log.max_seqs()? })
+        Ok(WorkspaceSummary { id: self.id.clone(), docs, seqs: self.log.max_seqs()?, tips: self.log.tips()? })
+    }
+
+    /// Whether a peer with `theirs` holds an event from `device` where this
+    /// copy holds a different one with the same number. Asked about this
+    /// device itself: yes means its log was rolled back and then added to.
+    /// (Events they have beyond ours say nothing yet; importing them does.)
+    pub fn forked_from(&self, device: &str, theirs: &WorkspaceSummary) -> Result<bool> {
+        let (Some(seq), Some(tip)) = (theirs.seqs.get(device), theirs.tips.get(device)) else { return Ok(false) };
+        Ok(self.log.hash_at(device, *seq)?.is_some_and(|h| &h != tip))
     }
 
     /// Only what a peer with `theirs` is missing. Without a summary (they
@@ -242,6 +257,14 @@ impl Workspace {
         report.events_rejected = events.rejected;
         report.untrusted = events.untrusted;
         report.problems = events.problems;
+        // The sender has events this very device signed that don't fit the
+        // ones here. Events of ours we simply lack (this copy was restored
+        // from an older one and not yet edited) were just imported above,
+        // and the next local event carries on after them.
+        if events.conflicts.contains(device) {
+            report.forked = true;
+            report.problems.push(crate::eventlog::FORKED.to_string());
+        }
 
         let attested = ws.log.attested(trusted)?;
         let ts = now_ms();

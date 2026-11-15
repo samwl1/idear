@@ -114,8 +114,17 @@ pub struct ImportedEvents {
     pub rejected: usize,
     /// Devices whose events were refused because they aren't (or are no longer) yours.
     pub untrusted: std::collections::BTreeSet<String>,
+    /// Devices that signed an offered event which contradicts the one this
+    /// log holds in its place: two histories under one key.
+    pub conflicts: std::collections::BTreeSet<String>,
     pub problems: Vec<String>,
 }
+
+/// What a device says when it finds its own log is one of two histories
+/// under its key. That happens when its data folder is put back from an
+/// older copy and then edited: the new events reuse numbers other devices
+/// already hold different events for, and they refuse everything after.
+pub const FORKED: &str = "this device's history here was rolled back and then changed (was its data folder restored from an older copy?), so it no longer matches what other devices already hold. Changes made on this device since then are not reaching them";
 
 /// Which Automerge changes signed events vouch for, per doc. A hash only
 /// counts for the doc the event names: an event about one doc (a member's
@@ -266,6 +275,28 @@ impl EventLog {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// The hash of each device's latest event. With `max_seqs` it lets
+    /// another copy tell whether the two hold the same history for a device,
+    /// not just the same amount of it.
+    pub fn tips(&self) -> Result<std::collections::BTreeMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT e.device, e.hash FROM events e
+             JOIN (SELECT device, MAX(seq) AS seq FROM events GROUP BY device) m
+               ON m.device = e.device AND m.seq = e.seq",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The hash of one event, if it's here.
+    pub fn hash_at(&self, device: &str, seq: u64) -> Result<Option<String>> {
+        let Ok(seq) = i64::try_from(seq) else { return Ok(None) };
+        Ok(self
+            .conn
+            .query_row("SELECT hash FROM events WHERE device = ?1 AND seq = ?2", params![device, seq], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Every event, oldest first per device. Used for export.
     pub fn all(&self) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(
@@ -313,6 +344,11 @@ impl EventLog {
             match existing {
                 Some(h) if h == e.hash => continue,
                 Some(_) => {
+                    // Only the device's own signature makes it a second
+                    // history; anyone can send a made-up event.
+                    if signed_by_its_device(e) {
+                        report.conflicts.insert(e.device.clone());
+                    }
                     report.rejected += 1;
                     report.problems.push(format!(
                         "device {short} has two different event #{}s; kept the one already here",
@@ -332,11 +368,7 @@ impl EventLog {
                 report.untrusted.insert(e.device.clone());
                 continue;
             }
-            let digest = canonical_hash(e)?;
-            let sig_ok = decode_key(&e.device)
-                .and_then(|vk| decode_sig(&e.sig).map(|s| vk.verify(&digest, &s).is_ok()))
-                .unwrap_or(false);
-            if hex::encode(digest) != e.hash || !sig_ok {
+            if !signed_by_its_device(e) {
                 report.rejected += 1;
                 report.problems.push(format!("device {short} event #{} failed its signature check", e.seq));
                 continue;
@@ -357,6 +389,7 @@ impl EventLog {
                 continue;
             }
             if e.prev != expected_prev {
+                report.conflicts.insert(e.device.clone());
                 report.rejected += 1;
                 report.problems.push(format!("device {short} event #{} doesn't follow its history", e.seq));
                 continue;
@@ -480,6 +513,15 @@ impl EventLog {
             problems,
         })
     }
+}
+
+/// Whether an event's hash is the hash of its fields and its device signed it.
+fn signed_by_its_device(e: &Event) -> bool {
+    let Ok(digest) = canonical_hash(e) else { return false };
+    hex::encode(digest) == e.hash
+        && decode_key(&e.device)
+            .and_then(|vk| decode_sig(&e.sig).map(|s| vk.verify(&digest, &s).is_ok()))
+            .unwrap_or(false)
 }
 
 /// The first characters of an id for messages; safe on any string.
