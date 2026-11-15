@@ -294,6 +294,12 @@ export function toExcalidraw(elements: Record<string, Element>, titleOf: Lookup)
     if (el?.type === "arrow") {
       ex.startBinding = bindingTo(el.start.bind, ids);
       ex.endBinding = bindingTo(el.end.bind, ids);
+      // It also pulls both ends of an arrow in by half a pixel, every time
+      // the board is built, so an arrow got a pixel shorter with each load
+      // and save. Put the stored points back.
+      ex.x = el.x;
+      ex.y = el.y;
+      ex.points = [[el.start.x, el.start.y], ...decodePoints(el.via), [el.end.x, el.end.y]];
     }
   }
   return restoreElements(scene, null, { repairBindings: true });
