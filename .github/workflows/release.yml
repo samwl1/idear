@@ -13,14 +13,56 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # Version tags only (v1.2.3, v1.2.3-beta.1), not anything that starts with a v.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   workflow_dispatch:
 
+# Read-only by default; only the build job, which creates the release, can write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # Nothing is built or published unless the tests pass and the tag matches
+  # the version the app will report.
+  test:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Tag matches the app version
+        if: github.ref_type == 'tag'
+        run: |
+          conf="v$(jq -r .version src-tauri/tauri.conf.json)"
+          pkg="v$(jq -r .version package.json)"
+          crate="v$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -n 1)"
+          for v in "$conf" "$pkg" "$crate"; do
+            if [ "$v" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match the version files (tauri.conf.json $conf, package.json $pkg, Cargo.toml $crate)."
+              exit 1
+            fi
+          done
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ". -> target"
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libdbus-1-dev build-essential \
+            libssl-dev librsvg2-dev libgtk-3-dev
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --workspace
+
   build:
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -32,19 +74,22 @@ jobs:
             args: ""
             targets: ""
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.targets }}
 
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target"
 
@@ -78,29 +123,41 @@ jobs:
             if [ -n "${!v}" ]; then echo "$v=${!v}" >> "$GITHUB_ENV"; fi
           done
 
-      - uses: tauri-apps/tauri-action@v0
+      # The install notes say what this build is: notarized only when the
+      # signing secrets are set. Every job in the matrix writes the same text,
+      # whichever one creates the release.
+      - name: Release notes
+        shell: bash
+        env:
+          NOTARIZED: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_ID != '' }}
+        run: |
+          if [ "$NOTARIZED" = "true" ]; then
+            mac="Signed and notarized, so it opens like any other app."
+          else
+            mac="The build isn't notarized yet, so the first launch needs one extra step: right-click the app, choose **Open**, and confirm. If macOS says the app is damaged instead, run \`xattr -cr /Applications/idear.app\` once in Terminal, then open it normally."
+          fi
+          {
+            echo "RELEASE_BODY<<IDEAR_EOF"
+            echo "## Install"
+            echo
+            echo "**macOS** (Apple Silicon and Intel, one download): open the \`.dmg\` and drag idear to Applications. $mac"
+            echo
+            echo "**Linux**: the \`.AppImage\` runs anywhere (\`chmod +x\` it first); the \`.deb\` is for Debian and Ubuntu, the \`.rpm\` for Fedora. Live sync and device linking keep your keys in the system keyring, so a running Secret Service (GNOME Keyring or KWallet) is needed."
+            echo
+            echo "**Windows**: not yet."
+            echo
+            echo "Your data lives in your own app folder and syncs only between your own devices and the people you invite. See the [docs](https://github.com/samwl1/idear/tree/main/docs) for sharing, update files, and connecting Claude."
+            echo "IDEAR_EOF"
+          } >> "$GITHUB_ENV"
+
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'untagged-build' }}
           releaseName: ${{ github.ref_type == 'tag' && format('idear {0}', github.ref_name) || 'Untagged build' }}
-          releaseBody: |
-            ## Install
-
-            **macOS** (Apple Silicon and Intel, one download): open the `.dmg` and drag idear to Applications.
-            The build isn't notarized yet, so the first launch needs one extra step: right-click the app,
-            choose **Open**, and confirm. If macOS says the app is damaged instead, run
-            `xattr -cr /Applications/idear.app` once in Terminal, then open it normally.
-
-            **Linux**: the `.AppImage` runs anywhere (`chmod +x` it first); the `.deb` is for Debian and
-            Ubuntu, the `.rpm` for Fedora. Live sync and device linking keep your keys in the system
-            keyring, so a running Secret Service (GNOME Keyring or KWallet) is needed.
-
-            **Windows**: not yet.
-
-            Your data lives in your own app folder and syncs only between your own devices and the people
-            you invite. See the [docs](https://github.com/samwl1/idear/tree/main/docs) for sharing, update
-            files, and connecting Claude.
+          releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: ${{ github.ref_type != 'tag' }}
-          prerelease: false
+          # v1.2.3-beta.1 and the like are marked as pre-releases.
+          prerelease: ${{ github.ref_type == 'tag' && contains(github.ref_name, '-') }}
           args: ${{ matrix.args }}
