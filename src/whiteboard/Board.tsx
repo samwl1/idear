@@ -28,7 +28,14 @@ function plain<T>(value: unknown): T {
 /** Point lists are long and only ever replaced whole, so store them as scalars. */
 function toStored(el: Element): unknown {
   if (el.type === "freehand") {
-    return { ...el, strokes: el.strokes.map((s) => ({ ...s, points: new A.ImmutableString(s.points) })) };
+    return {
+      ...el,
+      strokes: el.strokes.map((s) => ({
+        ...s,
+        points: new A.ImmutableString(s.points),
+        ...(s.pressures ? { pressures: new A.ImmutableString(s.pressures) } : {}),
+      })),
+    };
   }
   if (el.type === "arrow") return { ...el, via: new A.ImmutableString(el.via) };
   return el;

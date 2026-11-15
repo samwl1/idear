@@ -7,6 +7,7 @@ export type Font = "hand" | "sans" | "serif" | "mono";
 export type Align = "left" | "center" | "right";
 export type Fill = "solid" | "hatch" | "cross-hatch" | "zigzag";
 export type Stroke = "solid" | "dashed" | "dotted";
+export type VAlign = "top" | "middle" | "bottom";
 
 export interface Style {
   color: string; // stroke/text color, hex
@@ -29,13 +30,27 @@ interface Base {
   z: string; // fractional index; lower draws first
   groups: string[];
   style: Style;
+  // Added later, so boards saved before have none of the fields marked `?`.
+  // A missing one reads as the value every element had then.
+  /** A web link on the element. Missing or empty: none. Cards link to their page instead. */
+  link?: string;
+  /** Can't be selected or moved until unlocked. Missing: unlocked. */
+  locked?: boolean;
 }
 
-export interface BoxElement extends Base {
+/** The text inside a shape or on an arrow, where it differs from the element's own style. */
+interface Label {
+  /** Missing or empty: the text takes the element's color. */
+  textColor?: string;
+}
+
+export interface BoxElement extends Base, Label {
   type: "rect" | "ellipse" | "diamond";
   w: number;
   h: number;
   text: string;
+  /** Where the text sits top to bottom. Missing: middle. */
+  textValign?: VAlign;
 }
 
 export interface TextElement extends Base {
@@ -47,8 +62,13 @@ export interface TextElement extends Base {
 
 export interface FreehandElement extends Base {
   type: "freehand";
-  /** Each stroke's points as "x,y x,y ..." in element-local coordinates. */
-  strokes: { straight: boolean; points: string }[];
+  /**
+   * Each stroke's points as "x,y x,y ..." in element-local coordinates. A
+   * stroke drawn with a pen also has its pressure at each point, "p p ...".
+   */
+  strokes: { straight: boolean; points: string; pressures?: string }[];
+  /** False when the stroke's thickness comes from `pressures`. Missing: worked out from speed. */
+  simulatePressure?: boolean;
 }
 
 /** Where an arrow end is attached. `focus`/`gap` describe how it meets the target's edge. */
@@ -66,7 +86,7 @@ export interface Terminal {
   bind: Binding | null;
 }
 
-export interface ArrowElement extends Base {
+export interface ArrowElement extends Base, Label {
   type: "arrow";
   start: Terminal;
   end: Terminal;
@@ -119,6 +139,14 @@ export function decodePoints(s: string | undefined): [number, number][] {
 
 const round = (n: number) => Math.round(n * 10) / 10;
 
+export function encodePressures(pressures: readonly number[]): string {
+  return pressures.map((p) => Math.round(p * 1000) / 1000).join(" ");
+}
+
+export function decodePressures(s: string | undefined): number[] {
+  return s ? s.split(" ").map(Number) : [];
+}
+
 // ---- migration ----------------------------------------------------------------
 // Boards saved by the first (tldraw) build used named colors and size presets.
 // Read them forward so nothing drawn earlier is lost.
@@ -156,6 +184,9 @@ export function migrateStyle(raw: Loose | undefined): Style {
 }
 
 export function migrateElement(raw: Loose): Element {
+  // The optional fields are carried only when present, so an older element reads as it always did.
+  const optional = (...keys: string[]) =>
+    Object.fromEntries(keys.filter((k) => raw[k] != null).map((k) => [k, raw[k]]));
   const base = {
     x: raw.x ?? 0,
     y: raw.y ?? 0,
@@ -163,6 +194,7 @@ export function migrateElement(raw: Loose): Element {
     z: raw.z ?? "a0",
     groups: Array.isArray(raw.groups) ? raw.groups : [],
     style: migrateStyle(raw.style),
+    ...optional("link", "locked"),
   };
   if (raw.type === "arrow") {
     const term = (t: Loose | undefined): Terminal => ({
@@ -182,8 +214,11 @@ export function migrateElement(raw: Loose): Element {
       line: !!raw.line,
       heads: { start: raw.heads?.start ?? "none", end: raw.heads?.end ?? "arrow" },
       text: raw.text ?? "",
+      ...optional("textColor"),
     };
   }
-  if (raw.type === "freehand") return { ...base, type: "freehand", strokes: raw.strokes ?? [] };
+  if (raw.type === "freehand") {
+    return { ...base, type: "freehand", strokes: raw.strokes ?? [], ...optional("simulatePressure") };
+  }
   return { ...raw, ...base } as Element;
 }

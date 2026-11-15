@@ -13,11 +13,14 @@ import type {
 import {
   DEFAULT_STYLE,
   decodePoints,
+  decodePressures,
   encodePoints,
+  encodePressures,
   type Binding,
   type Element,
   type Font,
   type Style,
+  type VAlign,
 } from "./schema";
 
 /** Element types the schema can store. Anything else is removed from the canvas. */
@@ -85,13 +88,21 @@ export function fromExcalidraw(el: ExcalidrawElement, byId: Map<string, Excalidr
     const t = ref ? byId.get(ref.id) : null;
     return t && !t.isDeleted && t.type === "text" ? t : null;
   };
+  // The optional fields are always written, even when empty: a save only
+  // sets fields, so leaving one out would keep its old value in the document.
   const base = {
     x: el.x,
     y: el.y,
     rotation: el.angle,
     z: el.index ?? "a0",
     groups: [...el.groupIds],
+    link: el.link ?? "",
+    locked: el.locked,
   };
+  // A label usually has its shape's color; only one of its own is stored, so
+  // recoloring the shape in an older build still carries the text along.
+  const textColor = (label: ExcalidrawTextElement | null) =>
+    label && label.strokeColor !== el.strokeColor ? label.strokeColor : "";
 
   switch (el.type) {
     case "rectangle":
@@ -99,7 +110,8 @@ export function fromExcalidraw(el: ExcalidrawElement, byId: Map<string, Excalidr
     case "diamond": {
       const label = labelOf();
       const ref = (el.customData as { ref?: string } | undefined)?.ref;
-      if (ref) return { ...base, style: styleFrom(el, label), type: "card", w: el.width, h: el.height, ref };
+      // A card's link is its page, which `ref` already holds.
+      if (ref) return { ...base, link: "", style: styleFrom(el, label), type: "card", w: el.width, h: el.height, ref };
       return {
         ...base,
         style: styleFrom(el, label),
@@ -107,6 +119,8 @@ export function fromExcalidraw(el: ExcalidrawElement, byId: Map<string, Excalidr
         w: el.width,
         h: el.height,
         text: label?.originalText ?? "",
+        textColor: textColor(label),
+        textValign: (label?.verticalAlign as VAlign | undefined) ?? "middle",
       };
     }
     case "text":
@@ -124,7 +138,14 @@ export function fromExcalidraw(el: ExcalidrawElement, byId: Map<string, Excalidr
         ...base,
         style: styleFrom(el),
         type: "freehand",
-        strokes: [{ straight: false, points: encodePoints(el.points) }],
+        strokes: [
+          {
+            straight: false,
+            points: encodePoints(el.points),
+            ...(el.pressures.length ? { pressures: encodePressures(el.pressures) } : {}),
+          },
+        ],
+        simulatePressure: el.simulatePressure,
       };
     case "arrow":
     case "line": {
@@ -143,6 +164,7 @@ export function fromExcalidraw(el: ExcalidrawElement, byId: Map<string, Excalidr
         line: el.type === "line",
         heads: { start: el.startArrowhead ?? "none", end: el.endArrowhead ?? "none" },
         text: label?.originalText ?? "",
+        textColor: textColor(label),
       };
     }
     default:
@@ -187,18 +209,20 @@ function common(id: string, el: Element) {
     roughness: s.sketch,
     opacity: s.opacity,
     groupIds: el.groups,
+    link: el.link || null,
+    locked: !!el.locked,
   };
 }
 
-function label(text: string, s: Style) {
+function label(text: string, s: Style, own: { textColor?: string; textValign?: VAlign } = {}) {
   return text
     ? {
         text,
         fontFamily: FONT_TO_EX[s.font],
         fontSize: s.fontSize,
         textAlign: s.align,
-        verticalAlign: "middle",
-        strokeColor: s.color,
+        verticalAlign: own.textValign ?? "middle",
+        strokeColor: own.textColor || s.color,
       }
     : undefined;
 }
@@ -219,7 +243,7 @@ function toSkeleton(id: string, el: Element, titleOf: Lookup): Ex {
         roundness: s.rounded
           ? { type: el.type === "rect" ? ROUNDNESS.ADAPTIVE_RADIUS : ROUNDNESS.PROPORTIONAL_RADIUS }
           : null,
-        label: label(el.text, s),
+        label: label(el.text, s, el),
       };
     case "card":
       return {
@@ -248,8 +272,8 @@ function toSkeleton(id: string, el: Element, titleOf: Lookup): Ex {
         ...common(id, el),
         type: "freedraw",
         points: el.strokes.flatMap((st) => decodePoints(st.points)),
-        pressures: [],
-        simulatePressure: true,
+        pressures: el.strokes.flatMap((st) => decodePressures(st.pressures)),
+        simulatePressure: el.simulatePressure ?? true,
         lastCommittedPoint: null,
       };
     case "arrow":
@@ -261,7 +285,7 @@ function toSkeleton(id: string, el: Element, titleOf: Lookup): Ex {
         endArrowhead: el.heads.end === "none" ? null : el.heads.end,
         roundness: s.rounded ? { type: ROUNDNESS.PROPORTIONAL_RADIUS } : null,
         ...(el.line ? {} : { elbowed: el.route === "elbow" }),
-        label: label(el.text, s),
+        label: label(el.text, s, el),
       };
   }
 }
