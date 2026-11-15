@@ -115,8 +115,7 @@ type MdHelpers = { renderChildren: (node: unknown) => string };
 type MdNode = { attrs?: Record<string, unknown> };
 
 // Low priority puts color innermost, so bold or italic markdown wraps the span
-// (`**<span>…</span>**`). The other way round, markdown inside the span
-// wouldn't be parsed back.
+// (`**<span>…</span>**`) and the same text always saves the same way.
 const ColoredText = TextStyle.extend({
   priority: 40,
   renderMarkdown(node: MdNode, h: MdHelpers) {
@@ -134,6 +133,57 @@ const ColoredHighlight = Highlight.extend({
     return color ? `<mark data-color="${color}" style="background-color: ${color}">${inner}</mark>` : `==${inner}==`;
   },
 } as never).configure({ multicolor: true });
+
+type MdToken = { tokens?: unknown[]; mark?: string; color?: string };
+type MdParseHelpers = {
+  parseInline: (tokens: unknown[]) => unknown[];
+  applyMark: (mark: string, content: unknown[], attrs?: Record<string, unknown>) => unknown;
+};
+
+const COLOR_OPEN =
+  /^<(?:(span) style="color: ?([^";]+);?"|(mark) data-color="([^"]+)"(?: style="background-color: ?[^";]+;?")?)>/;
+
+/**
+ * Reads the color spans above back as markdown. The text inside them is
+ * written with markdown escapes (`a\*b`), but left alone the parser treats a
+ * whole `<span>…</span>` as HTML, where a backslash is just a backslash: each
+ * save then escaped the one before and the text grew (`a\*b`, `a\\\*b`, …).
+ * This takes exactly the two shapes written above and parses what's between
+ * the tags as inline markdown, so it comes back as it was typed. Any other
+ * HTML still goes through the HTML parser.
+ */
+const ColorMarkdown = Extension.create({
+  name: "colorMarkdown",
+  markdownTokenizer: {
+    name: "colorMarkdown",
+    level: "inline",
+    start: (src: string) => src.search(/<(?:span style="color:|mark data-color=")/),
+    tokenize(src: string, _tokens: unknown, h: { inlineTokens: (src: string) => unknown[] }) {
+      const open = COLOR_OPEN.exec(src);
+      if (!open) return undefined;
+      const tag = open[1] ?? open[3];
+      const color = safe(open[2] ?? open[4]);
+      if (!color) return undefined;
+      // Find this tag's own closing tag, stepping over same-named tags nested inside.
+      const tags = new RegExp(`<(/?)${tag}\\b[^>]*>`, "g");
+      tags.lastIndex = open[0].length;
+      let depth = 1;
+      let close: RegExpExecArray | null = null;
+      while (depth > 0 && (close = tags.exec(src))) depth += close[1] ? -1 : 1;
+      if (depth > 0 || !close) return undefined;
+      return {
+        type: "colorMarkdown",
+        raw: src.slice(0, close.index + close[0].length),
+        mark: tag === "span" ? "textStyle" : "highlight",
+        color,
+        tokens: h.inlineTokens(src.slice(open[0].length, close.index)),
+      };
+    },
+  },
+  parseMarkdown(token: MdToken, h: MdParseHelpers) {
+    return h.applyMark(token.mark ?? "textStyle", h.parseInline(token.tokens ?? []), { color: token.color });
+  },
+} as never);
 
 const MOD = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+";
 
@@ -207,6 +257,7 @@ export function MarkdownEditor({
       ColoredText,
       Color,
       ColoredHighlight,
+      ColorMarkdown,
       TaskList,
       TaskItem.configure({ nested: true }),
       CodeBlock,
