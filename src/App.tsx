@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { api, canEditRole, type WorkspaceInfo } from "./lib/api";
 import { CanEditContext } from "./lib/access";
 import { attachPins, detachPins } from "./lib/pins";
@@ -19,6 +19,8 @@ import { NavContext, type OpenOptions } from "./lib/nav";
 import { AccountContext } from "./lib/account";
 import type { AccountView, SyncApplied } from "./lib/api";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
+import { flushAll } from "./lib/pending";
 import { DevicesPage } from "./components/DevicesPage";
 import { Icon } from "./components/Icon";
 import { HelpPage } from "./components/HelpPage";
@@ -213,6 +215,28 @@ export default function App() {
       off.then((fn) => fn());
     };
   }, [session, onError]);
+
+  // This window is closing, or the app is quitting. Text typed in the last
+  // moment is still waiting on a typing pause: save it now, wait until it's
+  // stored, then tell the backend, which is holding the window open for this
+  // (see flush_then in src-tauri/src/lib.rs).
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  useEffect(() => {
+    const me = windowLabel();
+    const off = listen<{ id: number; window: string | null }>("flush-request", async ({ payload }) => {
+      if (payload.window && payload.window !== me) return;
+      try {
+        flushAll();
+        await sessionRef.current?.settled();
+      } finally {
+        invoke("flush_done", { id: payload.id }).catch(() => {});
+      }
+    });
+    return () => {
+      off.then((fn) => fn());
+    };
+  }, []);
 
   // Another device's changes arrived: merge them into what's open.
   useEffect(() => {
