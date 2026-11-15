@@ -327,7 +327,8 @@ impl Tracker {
                     phase: s(&task, "phase")?,
                     parent: s(&task, "parent")?,
                     tags: get_string_list(doc, &task, "tags").map_err(err)?,
-                    archived: get_i64(doc, &task, "archived").map_err(err)?.is_some_and(|a| a > 0),
+                    archived: get_i64(doc, &task, "archived").map_err(err)?.is_some_and(|a| a > 0)
+                        || get_bool(doc, &task, "archived").map_err(err)?.unwrap_or(false),
                     id,
                 });
             }

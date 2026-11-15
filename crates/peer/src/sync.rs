@@ -660,10 +660,31 @@ impl SyncCtx {
         })
     }
 
+    /// Workspaces where the peer holds a different event from this device
+    /// than this device does for the same number: its log was rolled back
+    /// (the data folder restored from an older copy) and then added to.
+    /// Returned as problems to show; nothing here can mend it.
+    fn forks(&self, shared: &[String], theirs: &Hello) -> Res<Vec<String>> {
+        let me = self.me();
+        let by_id: BTreeMap<&str, &WorkspaceSummary> =
+            theirs.workspaces.iter().map(|w| (w.summary.id.as_str(), &w.summary)).collect();
+        self.with_workspaces(|open, _, _| {
+            let mut out = Vec::new();
+            for id in shared {
+                let (Some(ws), Some(summary)) = (open.get(id), by_id.get(id.as_str())) else { continue };
+                if ws.forked_from(&me, summary).map_err(err)? {
+                    out.push(format!("{}: {}", ws.name().map_err(err)?, notes_core::eventlog::FORKED));
+                }
+            }
+            Ok(out)
+        })
+    }
+
     pub(crate) fn apply(&self, peer: &Peer, accepted: &BTreeMap<String, (Members, Members)>, removed: &[MemberRecord], delta: &Delta) -> Res<Applied> {
         let own = self.own()?;
         let me = self.me();
         let mut applied = Applied::default();
+        let mut created = Vec::new();
         let mut open = self.open.lock().map_err(|_| "workspace lock poisoned")?;
 
         // Membership first, including for workspaces with no new content.
@@ -703,7 +724,7 @@ impl SyncCtx {
             };
             applied.new_workspaces |= r.created;
             if r.created {
-                self.mark_present(&r.id)?;
+                created.push(r.id.clone());
             }
             if r.members_changed {
                 applied.members_changed.insert(r.id.clone());
@@ -728,6 +749,13 @@ impl SyncCtx {
                     open.remove(&r.workspace);
                 }
             }
+        }
+        // Deleting a workspace takes the removals file and then the open
+        // workspaces. Taking them the other way round here could leave the
+        // two waiting on each other, so let go of the workspaces first.
+        drop(open);
+        for id in &created {
+            self.mark_present(id)?;
         }
         Ok(applied)
     }
@@ -940,7 +968,7 @@ impl SyncCtx {
                 (None, Peer::Own) => Members::new(&wb.id, &b.identity),
                 (None, Peer::Other(_)) => continue,
             };
-            let summary = WorkspaceSummary { id: wb.id.clone(), docs: Default::default(), seqs: Default::default() };
+            let summary = WorkspaceSummary { id: wb.id.clone(), docs: Default::default(), seqs: Default::default(), tips: Default::default() };
             shared.push(Shared { summary, members });
         }
         let accepted = self.accepted(&peer, &Hello { workspaces: shared, removed: Vec::new(), deleted: Default::default() })?;
@@ -1023,6 +1051,7 @@ async fn exchange(
     }
 
     let accepted = { let (c, p, t) = (ctx.clone(), peer.clone(), theirs.clone()); blocking(move || c.accepted(&p, &t)).await? };
+    let forks = { let (c, s, t) = (ctx.clone(), shared.clone(), theirs.clone()); blocking(move || c.forks(&s, &t)).await? };
     let delta = { let (c, p, s, t) = (ctx.clone(), peer.clone(), shared.clone(), theirs.clone()); blocking(move || c.delta_for(&p, &s, &t)).await? };
     let (wrote, got) = tokio::join!(write_frame(send, &delta), read_frame::<Delta>(recv, DELTA_LIMIT));
     wrote?;
@@ -1030,6 +1059,11 @@ async fn exchange(
     send.finish().map_err(err)?;
     let (c, p) = (ctx.clone(), peer.clone());
     let mut applied = blocking(move || c.apply(&p, &accepted, &theirs.removed, &incoming)).await?;
+    for f in forks {
+        if !applied.problems.contains(&f) {
+            applied.problems.push(f);
+        }
+    }
     applied.removed_workspaces.extend(moved.0);
     applied.new_workspaces |= !moved.1.is_empty();
     // Closing before the peer has everything we sent would cut it off.
@@ -1297,6 +1331,9 @@ impl SyncService {
 
     fn problem(&self, msg: String) {
         if let Ok(mut p) = self.problems.lock() {
+            // Something still wrong at every sync is said once, and kept
+            // among the latest.
+            p.retain(|x| x != &msg);
             p.push(msg);
             let n = p.len();
             if n > 20 {
