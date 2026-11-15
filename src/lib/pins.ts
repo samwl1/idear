@@ -129,7 +129,10 @@ const samePin = (a: Pin, b: Pin) => pinKey(a) === pinKey(b);
 
 function accountPins(workspace: string): Pin[] {
   const doc = sessions.get(workspace)?.privateSnapshot;
-  return doc ? doc.pins.map(fromStored) : [];
+  if (!doc) return [];
+  // Two devices can add the same pin before they've synced; show it once.
+  const seen = new Set<string>();
+  return doc.pins.map(fromStored).filter((p) => seen.size !== seen.add(pinKey(p)).size);
 }
 
 function changeAccountPins(workspace: string, fn: (pins: PrivatePin[]) => void): Promise<void> {
