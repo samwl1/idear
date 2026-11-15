@@ -103,7 +103,16 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
   sessionRef.current = session;
 
   useEffect(() => {
-    scene?.forEach((el) => versions.current.set(el.id, el.version));
+    scene?.forEach((el) => {
+      versions.current.set(el.id, el.version);
+      // A stored position the canvas had to replace (two elements sharing
+      // one, from before positions were handed back to it) goes out with the
+      // next save. Otherwise the pair's order would hang on a repair made
+      // again at every load, and could flip once something lands between them.
+      const stored = initial?.[el.id] as { z?: unknown } | undefined;
+      if (canEdit && stored && String(stored.z) !== el.index) dirty.current.add(el.id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene]);
 
   const flush = useCallback(() => {

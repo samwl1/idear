@@ -152,10 +152,30 @@ export function fromExcalidraw(el: ExcalidrawElement, byId: Map<string, Excalidr
 
 // ---- schema -> Excalidraw --------------------------------------------------------
 
+/**
+ * Whether a stored `z` is a fractional index the canvas can keep. One that
+ * isn't (written by hand, or by a much older build) is left out and the canvas
+ * gives the element a fresh one in the same place. The canvas doesn't check
+ * what it's handed, and throws later, when it needs a new index next to a bad
+ * one (a label's, say), which would stop the whole board from loading.
+ */
+function validIndex(z: unknown): z is string {
+  if (typeof z !== "string" || !/^[A-Za-z][0-9A-Za-z]*$/.test(z)) return false;
+  // The first character says how long the whole-number part is.
+  const head = z.charCodeAt(0);
+  const whole = head >= 97 ? head - 97 + 2 : 90 - head + 2;
+  if (z.length < whole || z === `A${"0".repeat(26)}`) return false;
+  return !z.slice(whole).endsWith("0");
+}
+
 function common(id: string, el: Element) {
   const s = el.style;
   return {
     id,
+    // The stored place in the stack. Without it the canvas renumbers every
+    // element on load, and what's saved after that no longer sorts against
+    // what was saved before.
+    ...(validIndex(el.z) ? { index: el.z } : {}),
     x: el.x,
     y: el.y,
     angle: el.rotation,
@@ -253,7 +273,11 @@ function bindingTo(b: Binding | null, ids: Set<string>) {
 
 /** Build the full Excalidraw scene for stored elements, in z order. */
 export function toExcalidraw(elements: Record<string, Element>, titleOf: Lookup): ExcalidrawElement[] {
-  const entries = Object.entries(elements).sort(([, a], [, b]) => (a.z < b.z ? -1 : a.z > b.z ? 1 : 0));
+  // Two elements can share a `z` (boards saved before the index was handed
+  // back to the canvas); the id settles it, so they load the same way round every time.
+  const entries = Object.entries(elements).sort(([ia, a], [ib, b]) =>
+    a.z < b.z ? -1 : a.z > b.z ? 1 : ia < ib ? -1 : ia > ib ? 1 : 0,
+  );
   const ids = new Set(entries.map(([id]) => id));
   const skeletons: Ex[] = [];
   for (const [id, el] of entries) {
