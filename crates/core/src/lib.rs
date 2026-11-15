@@ -1082,6 +1082,98 @@ mod check_tests {
     use automerge::ReadDoc;
     use ed25519_dalek::SigningKey;
 
+    /// A workspace with a note and a project in the layout, a page that was
+    /// deleted (its doc stays as history), and a private doc.
+    fn with_pages(root: &std::path::Path, dev: &SigningKey) -> Workspace {
+        let mut m = automerge::AutoCommit::new();
+        m.put(automerge::ROOT, "name", "Team").unwrap();
+        let nodes = m.put_object(automerge::ROOT, "nodes", automerge::ObjType::Map).unwrap();
+        for (id, kind) in [("page1", "note"), ("proj1", "tracker"), ("old1", "whiteboard")] {
+            let n = m.put_object(&nodes, id, automerge::ObjType::Map).unwrap();
+            m.put(&n, "kind", kind).unwrap();
+            m.put(&n, "order", "a0").unwrap();
+        }
+        let mut ws = Workspace::create(root, "w", &m.save(), dev).unwrap();
+        for (id, kind, title) in [("page1", "note", "Hello"), ("proj1", "tracker", "Launch"), ("old1", "whiteboard", "Sketch")] {
+            let mut d = automerge::AutoCommit::new();
+            d.put(automerge::ROOT, "title", title).unwrap();
+            ws.create_doc(dev, id, kind, &d.save(), &format!("{kind}.create")).unwrap();
+        }
+        let private = workspace::private_doc_id(&"ab".repeat(32));
+        ws.create_doc(dev, &private, workspace::PRIVATE, &automerge::AutoCommit::new().save(), "private.create").unwrap();
+        let (_, nodes) = m.get(automerge::ROOT, "nodes").unwrap().unwrap();
+        m.delete(&nodes, "old1").unwrap();
+        m.commit();
+        let c = m.get_last_local_change().unwrap().raw_bytes().to_vec();
+        ws.apply_change(dev, MANIFEST, c, "tree.delete", Some("old1")).unwrap();
+        ws
+    }
+
+    fn retitle(ws: &mut Workspace, dev: &SigningKey, id: &str, to: &str) {
+        let mut d = automerge::AutoCommit::load(&ws.load_doc(id).unwrap()).unwrap();
+        d.put(automerge::ROOT, "title", to).unwrap();
+        d.commit();
+        let c = d.get_last_local_change().unwrap().raw_bytes().to_vec();
+        ws.apply_change(dev, id, c, "note.edit", None).unwrap();
+    }
+
+    fn titles(ws: &Workspace) -> Vec<(String, String, bool)> {
+        ws.tree().unwrap().into_iter().map(|n| (n.id, n.title, n.missing)).collect()
+    }
+
+    /// index.sqlite is derived and may be deleted. Which kind each doc is
+    /// was written nowhere else, so the next open has to work it out again.
+    #[test]
+    fn a_deleted_index_is_rebuilt_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = SigningKey::from_bytes(&[2; 32]);
+        let ws = with_pages(dir.path(), &dev);
+        let (before, docs_before) = (titles(&ws), ws.index.docs().unwrap());
+        assert_eq!(docs_before.len(), 5);
+        drop(ws);
+        for f in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"] {
+            let _ = std::fs::remove_file(dir.path().join("w").join(f));
+        }
+
+        let mut ws = Workspace::open(dir.path(), "w").unwrap();
+        assert_eq!(ws.name().unwrap(), "Team");
+        assert_eq!(titles(&ws), before);
+        assert_eq!(titles(&ws)[0], ("page1".to_string(), "Hello".to_string(), false));
+        // Every doc is known again with its kind, the deleted page (from
+        // its events) and the private doc (from its id) included, so they
+        // still sync.
+        assert_eq!(ws.index.docs().unwrap(), docs_before);
+        assert_eq!(ws.summary(true).unwrap().docs.len(), 5);
+        assert!(ws.check().unwrap().ok, "{:?}", ws.check().unwrap());
+        // And pages take changes again.
+        retitle(&mut ws, &dev, "page1", "Hello again");
+        assert_eq!(ws.title_of("page1").unwrap().as_deref(), Some("Hello again"));
+        assert_eq!(list_workspaces(dir.path()).unwrap()[0].name, "Team");
+    }
+
+    /// The same loss while the workspace is open: check says so, and
+    /// Repair puts it right.
+    #[test]
+    fn check_finds_unregistered_docs_and_repair_registers_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let dev = SigningKey::from_bytes(&[2; 32]);
+        let mut ws = with_pages(dir.path(), &dev);
+        let docs_before = ws.index.docs().unwrap();
+        ws.index.forget_docs();
+        assert!(titles(&ws).iter().all(|(_, _, missing)| *missing));
+
+        let r = ws.check().unwrap();
+        assert!(!r.ok, "{r:?}");
+        assert!(r.layout_only.iter().any(|p| p == "page1") && r.layout_only.iter().any(|p| p.starts_with("old1 ")), "{r:?}");
+        assert_eq!(r.layout_only.len(), 5, "{r:?}");
+
+        assert_eq!(ws.repair_index("dev").unwrap(), 5);
+        assert_eq!(ws.index.docs().unwrap(), docs_before);
+        assert!(titles(&ws).iter().all(|(_, title, missing)| !title.is_empty() && !*missing));
+        assert!(ws.check().unwrap().ok, "{:?}", ws.check().unwrap());
+        retitle(&mut ws, &dev, "page1", "Hello again");
+    }
+
     /// A sidebar index that still lists a page the layout dropped is a
     /// ghost; check finds it, repair removes it.
     #[test]

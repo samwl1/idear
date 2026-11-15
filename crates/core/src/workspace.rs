@@ -34,7 +34,8 @@ pub struct CheckReport {
     pub docs: usize,
     /// In the sidebar's index but not in the layout: ghosts. `repair_index` removes them.
     pub index_only: Vec<String>,
-    /// In the layout but not in the index. `repair_index` adds them.
+    /// In the layout but not in the index, or stored here without the index
+    /// knowing what kind of doc it is. `repair_index` adds them.
     pub layout_only: Vec<String>,
     /// Trusted events whose change isn't in the doc they name: a change
     /// that was refused or never arrived. Sync can't fix these on its own
@@ -337,14 +338,68 @@ impl Workspace {
 
     fn open_dir(id: &str, dir: PathBuf) -> Result<Self> {
         let members = Members::load(&dir.join("members.json"))?.filter(|m| m.workspace == id);
-        Ok(Self {
+        let mut ws = Self {
             id: id.to_string(),
             docs: DocStore::open(&dir.join("docs"))?,
             index: Index::open(&dir.join("index.sqlite"))?,
             log: EventLog::open(&dir.join("events.db"), id)?,
             members,
             dir,
-        })
+        };
+        // The index was deleted (it is derived, so that's allowed) while the
+        // docs are still here: build it again before anything reads it. A
+        // doc that can't be read shouldn't keep the workspace from opening.
+        if ws.docs.exists(MANIFEST)? && ws.index.docs()?.is_empty() {
+            if let Err(e) = ws.repair_index("") {
+                eprintln!("Couldn't rebuild the index of workspace {id}: {e}");
+            }
+        }
+        Ok(ws)
+    }
+
+    /// Doc files the index has no record of, with the kind each one is. The
+    /// index is the only place a doc's kind is written down, so after it is
+    /// deleted the kind comes from the id (the layout, private docs), then
+    /// the layout's entry for the page, then the events logged about it (a
+    /// deleted page is in neither of the first two). A file whose kind can't
+    /// be told is left out.
+    fn unregistered_docs(&mut self) -> Result<Vec<(String, String)>> {
+        let known: std::collections::HashSet<String> = self.index.docs()?.into_iter().map(|(id, _)| id).collect();
+        let missing: Vec<String> = self.docs.ids()?.into_iter().filter(|id| !known.contains(id)).collect();
+        if missing.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut kinds: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for e in self.log.all()? {
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(&e.data) else { continue };
+            let (Some(doc), Some(kind)) = (data.get("doc").and_then(|v| v.as_str()), data.get("kind").and_then(|v| v.as_str())) else { continue };
+            if ITEM_KINDS.contains(&kind) {
+                kinds.entry(doc.to_string()).or_insert_with(|| kind.to_string());
+            }
+        }
+        if let Some(m) = self.docs.peek(MANIFEST)? {
+            if let Some(map) = get_map(m, &root(), "nodes")? {
+                for id in &missing {
+                    let Some(node) = get_map(m, &map, id)? else { continue };
+                    if let Some(kind) = get_string(m, &node, "kind")?.filter(|k| ITEM_KINDS.contains(&k.as_str())) {
+                        kinds.insert(id.clone(), kind);
+                    }
+                }
+            }
+        }
+        Ok(missing
+            .into_iter()
+            .filter_map(|id| {
+                let kind = if id == MANIFEST {
+                    MANIFEST.to_string()
+                } else if is_private_doc(&id) {
+                    PRIVATE.to_string()
+                } else {
+                    kinds.get(&id)?.clone()
+                };
+                Some((id, kind))
+            })
+            .collect())
     }
 
     // ---- membership -----------------------------------------------------------------
@@ -581,6 +636,15 @@ impl Workspace {
                 }
             }
         }
+        // 3. Doc files vs the index's record of them. An unrecorded doc has
+        // no title, takes no changes, and isn't offered to other devices.
+        for (id, _) in self.unregistered_docs()? {
+            if !in_layout.contains(&id) {
+                report.layout_only.push(format!("{id} (stored here, but the index doesn't know it)"));
+            } else if !report.layout_only.contains(&id) {
+                report.layout_only.push(id);
+            }
+        }
         report.docs = self.index.docs()?.len();
         report.ok = report.index_only.is_empty() && report.layout_only.is_empty() && report.unapplied.is_empty();
         Ok(report)
@@ -589,10 +653,15 @@ impl Workspace {
     /// Rebuild the index from the docs: the layout and every item, as if
     /// each had just arrived. Fixes a sidebar that lists what the layout no
     /// longer has, and search results for text that changed without being
-    /// indexed. Leaves the docs and the log alone.
+    /// indexed. Also works from nothing, after the index file was deleted.
+    /// Leaves the docs and the log alone.
     pub fn repair_index(&mut self, device: &str) -> Result<usize> {
         let ts = now_ms();
         let mut n = 0;
+        // Docs the index lost track of first, so the rest finds them.
+        for (id, kind) in self.unregistered_docs()? {
+            self.index.register_doc(&id, &kind)?;
+        }
         // The layout first: it decides what the tree holds.
         if self.docs.exists(MANIFEST)? {
             self.reindex(MANIFEST, MANIFEST, device, ts)?;

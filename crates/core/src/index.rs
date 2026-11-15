@@ -1,4 +1,6 @@
-//! SQLite index. Derived from the Automerge docs and safe to delete and rebuild.
+//! SQLite index. Derived from the Automerge docs and safe to delete and rebuild
+//! (`Workspace::repair_index` does it, and opening a workspace whose index is
+//! gone does it unasked).
 //! Powers the sidebar tree now, and Views and search later.
 
 use std::path::Path;
@@ -266,6 +268,12 @@ impl Index {
             params![id, kind],
         )?;
         Ok(())
+    }
+
+    /// Lose track of every doc, as deleting the index file does.
+    #[cfg(test)]
+    pub(crate) fn forget_docs(&self) {
+        self.conn.execute("DELETE FROM docs", []).unwrap();
     }
 
     /// Every stored doc and its kind.

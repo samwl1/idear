@@ -34,6 +34,23 @@ impl DocStore {
         Ok(self.dir.join(format!("{id}.am")))
     }
 
+    /// The id of every doc stored here, sorted.
+    pub fn ids(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("am") {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if self.path(id).is_ok() {
+                out.push(id.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     pub fn exists(&self, id: &str) -> Result<bool> {
         Ok(self.path(id)?.exists())
     }
