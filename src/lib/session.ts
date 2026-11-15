@@ -827,6 +827,10 @@ export class WorkspaceSession {
       if (n.kind === "folder" || !sub.docs[old]) continue;
       const copy = sub.docs[old] as Note | Whiteboard;
       if (copy.links) copy.links = copy.links.filter((l) => inside.has(l)).map(map);
+      // A project's tasks carry links of their own; treat them the same way.
+      for (const task of Object.values((copy as Partial<Tracker>).tasks ?? {})) {
+        if (Array.isArray(task.links)) task.links = (task.links as string[]).filter((l) => inside.has(l)).map(map);
+      }
       let doc = A.from<ItemBase>(copy);
       let id = ids[old];
       try {
