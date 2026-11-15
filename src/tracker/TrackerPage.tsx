@@ -15,6 +15,7 @@ import { PinButton } from "../components/PinnedNav";
 import { PopOutButton } from "../components/PopOutButton";
 import { isPinned, usePins } from "../lib/pins";
 import { useCanEdit } from "../lib/access";
+import { expandMe, useAccount } from "../lib/account";
 
 type Tab = "board" | "backlog" | "phases" | "roadmap";
 const TABS: { id: Tab; label: string }[] = [
@@ -133,6 +134,12 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
     }
   }, [view, ops, onError, canEdit]);
 
+  // "@me" in the default assignee is whoever is creating the task: saved as
+  // their name, never as the literal text (which would read as nobody on
+  // every device). With no account name yet, the task starts unassigned.
+  const myName = useAccount().account?.name ?? "";
+  const assignee = (myName ? expandMe(hot.assignee, myName) : hot.assignee.replace(/@me\b/gi, "")).trim();
+
   /** The defaults expanded for `count` tasks against the latest project state. */
   const expanded = (count: number) => {
     const latest = session.peekItem<TrackerDoc>(id);
@@ -158,7 +165,7 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
       tags: x.tags,
       priority: hot.priority,
       phaseName: x.phase,
-      assignee: hot.assignee,
+      assignee,
       column: hot.column || undefined,
       due: x.due,
       ...init,
@@ -185,7 +192,7 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
           tags: x.tags,
           priority: hot.priority,
           phaseName: x.phase,
-          assignee: hot.assignee,
+          assignee,
           column: hot.column || undefined,
           due: x.due,
           title: x.title,

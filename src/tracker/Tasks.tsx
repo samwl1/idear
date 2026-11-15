@@ -537,9 +537,10 @@ function ActionBar({
           </option>
         ))}
       </select>
-      <select className="field backlog-phase" aria-label="Assign" value="" onChange={(e) => e.target.value && run(ops.updateMany(ids, { assignee: e.target.value === "none" ? "" : e.target.value === "@me" ? me || "@me" : e.target.value }))}>
+      <select className="field backlog-phase" aria-label="Assign" value="" onChange={(e) => e.target.value && run(ops.updateMany(ids, { assignee: e.target.value === "none" ? "" : e.target.value === "@me" && me ? me : e.target.value }))}>
         <option value="">Assign…</option>
-        <option value="@me">Me{me ? ` (${me})` : ""}</option>
+        {/* Without an account name there is nothing "me" could be saved as. */}
+        {me && <option value="@me">Me ({me})</option>}
         {assignees.filter((a) => a !== me).map((a) => (
           <option key={a} value={a}>
             {a}
