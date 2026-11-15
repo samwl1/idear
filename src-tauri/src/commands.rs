@@ -397,6 +397,24 @@ pub struct GitInfo {
     pub branch: Option<String>,
 }
 
+/// A remote's URL without the username or token an https remote can carry
+/// (`https://user:token@host/repo`). The app stores the remote in the
+/// project, which syncs to everyone in the workspace, and a token is not
+/// theirs to have. The user in an ssh remote (`git@host:path`,
+/// `ssh://git@host/path`) is part of the address and no secret, so it stays.
+fn without_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return url.to_string();
+    }
+    // The part before the path names the host; anything up to its last `@` is the login.
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn git_info(path: String) -> CmdResult<GitInfo> {
     let dir = PathBuf::from(&path);
@@ -414,7 +432,7 @@ pub async fn git_info(path: String) -> CmdResult<GitInfo> {
         } else if in_origin {
             if let Some(v) = l.strip_prefix("url") {
                 if let Some(v) = v.trim_start().strip_prefix('=') {
-                    remote = Some(v.trim().to_string());
+                    remote = Some(without_credentials(v.trim()));
                 }
             }
         }
@@ -509,5 +527,33 @@ pub async fn git_branches(path: Option<String>, url: Option<String>) -> CmdResul
             error: Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
         }),
         Err(e) => Ok(GitBranches { branches: Vec::new(), source: "remote", error: Some(format!("git not available: {e}")) }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_credentials;
+
+    #[test]
+    fn remotes_lose_their_credentials() {
+        for (given, want) in [
+            ("https://sam:ghp_secret@github.com/sam/repo.git", "https://github.com/sam/repo.git"),
+            ("https://ghp_secret@github.com/sam/repo.git", "https://github.com/sam/repo.git"),
+            ("http://sam:p%40ss@git.example.com:8080/r.git", "http://git.example.com:8080/r.git"),
+            ("HTTPS://x-access-token:tok@github.com/a/b", "HTTPS://github.com/a/b"),
+            ("https://user:pa@ss@host/repo", "https://host/repo"),
+            ("https://token@host", "https://host"),
+            // Nothing to remove.
+            ("https://github.com/sam/repo.git", "https://github.com/sam/repo.git"),
+            ("https://github.com/sam/re@po.git", "https://github.com/sam/re@po.git"),
+            ("https://host/path?ref=a@b", "https://host/path?ref=a@b"),
+            // ssh remotes name a user, not a secret.
+            ("git@github.com:sam/repo.git", "git@github.com:sam/repo.git"),
+            ("ssh://git@github.com/sam/repo.git", "ssh://git@github.com/sam/repo.git"),
+            ("/srv/git/repo.git", "/srv/git/repo.git"),
+            ("", ""),
+        ] {
+            assert_eq!(without_credentials(given), want, "{given}");
+        }
     }
 }
