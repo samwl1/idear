@@ -7,6 +7,7 @@ import { useCanEdit } from "../lib/access";
 import { isPinned, usePins } from "../lib/pins";
 import { PinButton } from "../components/PinnedNav";
 import { BranchButton } from "../components/GitButton";
+import { PhaseDate } from "./Roadmap";
 
 interface Props {
   /** Workspace id, for pins. */
@@ -182,24 +183,24 @@ export function Kanban({ workspace, view, ops, openTask, onOpenTask, onError }: 
           )}
           {active && (
             <span className="board-window" title={span ? `${span.label}. ${span.text}` : "Set the phase's planned start and end"}>
-              <input
-                type="date"
-                className="field phase-date"
-                aria-label="Phase start"
+              <PhaseDate
+                label="Phase start"
                 value={active.start ?? ""}
+                max={active.end || undefined}
                 disabled={!canEdit}
-                onChange={(e) => run(ops.setPhaseDates(active.id, { start: e.target.value }))}
+                onCommit={(start) => ops.setPhaseDates(active.id, { start })}
+                onError={onError}
               />
               <span className="muted small" aria-hidden="true">
                 to
               </span>
-              <input
-                type="date"
-                className="field phase-date"
-                aria-label="Phase end"
+              <PhaseDate
+                label="Phase end"
                 value={active.end ?? ""}
+                min={active.start || undefined}
                 disabled={!canEdit}
-                onChange={(e) => run(ops.setPhaseDates(active.id, { end: e.target.value }))}
+                onCommit={(end) => ops.setPhaseDates(active.id, { end })}
+                onError={onError}
               />
               {span ? (
                 <>
