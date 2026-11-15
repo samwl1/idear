@@ -123,6 +123,8 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
       const el = fromExcalidraw(ex, byId);
       if (el) puts.push([eid, el]);
     }
+    // An element being saved is never also deleted: deletes run after puts.
+    for (const [eid] of puts) dels.delete(eid);
     dirty.current.clear();
     removed.current.clear();
     if (!puts.length && !dels.size) return;
@@ -165,6 +167,8 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
         dirty.current.delete(el.id);
       } else {
         dirty.current.add(target);
+        // Back from a delete (undo) before the delete was saved: it's no longer removed.
+        if (!el.isDeleted) removed.current.delete(el.id);
       }
     }
     // Images, frames, and embeds have no place in the schema.
