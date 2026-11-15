@@ -145,6 +145,8 @@ type Listener = () => void;
 /** What's pinned in a workspace, for one account: syncs between its devices only. */
 export type PrivateDoc = {
   pins: PrivatePin[];
+  /** Pins already copied out of a hidden list (see healPins). */
+  healed?: Record<string, boolean>;
 };
 /** A pin as stored in the private doc: a Pin without device-only scope. */
 export type PrivatePin = Record<string, string>;
@@ -243,26 +245,63 @@ export class WorkspaceSession {
    * device, so when they merge, Automerge keeps one device's pin list at the
    * root and hides the others. Copy the hidden pins into the visible list;
    * every device picks the same winner, so they all end up agreeing.
+   *
+   * The hidden lists never go away, so each pin copied out of one is noted in
+   * the doc's `healed` map ("<list> <pin>") and is copied only once: unpin it
+   * later and it stays unpinned, on every device. A pin added to a hidden
+   * list afterwards (by a device that hasn't merged yet) has no note, so it
+   * still comes across. Runs on load and after every merge from elsewhere.
    */
   private async healPins(): Promise<void> {
     const doc = this.privateDoc;
     if (!doc) return;
-    const conflicts = A.getConflicts(doc, "pins");
-    if (!conflicts || Object.keys(conflicts).length < 2) return;
     const key = (p: PrivatePin) => `${p.kind}:${p.id ?? ""}`;
+    const shown = A.getObjectId(doc.pins);
+    // What earlier heals already dealt with, on any device. Two devices can
+    // each start the `healed` map before they've synced, which leaves
+    // competing maps just as the pins were, so read every one of them.
+    const done = new Set<string>();
+    // (getConflicts answers only when there's more than one.)
+    for (const marks of [doc.healed, ...Object.values(A.getConflicts(doc, "healed") ?? {})]) {
+      if (marks && typeof marks === "object") Object.keys(marks).forEach((m) => done.add(m));
+    }
     const have = new Set(doc.pins.map(key));
     const lost: PrivatePin[] = [];
-    for (const list of Object.values(conflicts)) {
-      if (!Array.isArray(list)) continue;
-      for (const p of list as PrivatePin[]) {
+    const marks: string[] = [];
+    for (const [list, pins] of Object.entries(A.getConflicts(doc, "pins") ?? {})) {
+      if (list === shown || !Array.isArray(pins)) continue;
+      for (const p of pins as PrivatePin[]) {
+        const mark = `${list} ${key(p)}`;
+        if (done.has(mark)) continue;
+        done.add(mark);
+        marks.push(mark);
         if (!have.has(key(p))) {
           have.add(key(p));
           lost.push({ ...p });
         }
       }
     }
-    if (!lost.length) return;
-    await this.changePrivate((d) => lost.forEach((p) => d.pins.push(p)));
+    const seen = new Set<string>();
+    const doubled = doc.pins.some((p) => seen.size === seen.add(key(p)).size);
+    if (!marks.length && !doubled) return;
+    await this.changePrivate((d) => {
+      lost.forEach((p) => d.pins.push(p));
+      if (marks.length) {
+        if (!d.healed) d.healed = {};
+        for (const m of marks) d.healed[m] = true;
+      }
+      // Two devices that heal before they've synced both copy the same pins.
+      // Everyone drops the later copy, so doing this on each device is safe.
+      const kept = new Set<string>();
+      for (let i = 0; i < d.pins.length; ) {
+        const k = key(d.pins[i]);
+        if (kept.has(k)) d.pins.splice(i, 1);
+        else {
+          kept.add(k);
+          i++;
+        }
+      }
+    });
   }
 
   /** The private doc if it's loaded; otherwise null (see loadPrivate). */
@@ -346,6 +385,7 @@ export class WorkspaceSession {
    */
   async applyRemote(docIds: string[]) {
     flushAll();
+    let healPrivate = false;
     for (const id of docIds) {
       // Each reload takes its turn in the write queue: a save made while the
       // doc is being read either lands first and is in what's read, or runs
@@ -365,6 +405,7 @@ export class WorkspaceSession {
             this.missing.delete(id); // the page's next load fetches it
           } else if (id === this.privateId && this.privateDoc) {
             this.privateDoc = A.load<PrivateDoc>(await api.loadDoc(this.id, id));
+            healPrivate = true;
           } else {
             return;
           }
@@ -374,6 +415,8 @@ export class WorkspaceSession {
         }
       });
     }
+    // The merge that just arrived may be the one that leaves competing pin lists.
+    if (healPrivate) await this.healPins().catch((err) => console.error("Couldn't heal pins", err));
     this.emit();
   }
 

@@ -71,9 +71,14 @@ from another device.
   passphrase only controls who can read the file, never what counts.
 - **Private docs** (pins) go only in files for your own devices. Every device seeds a new one
   identically (a fixed actor, no timestamp), so two devices that start it before they've synced
-  produce the same first change and merge cleanly. Docs from before that healed themselves: when
+  produce the same first change and merge cleanly. Docs from before that heal themselves: when
   a merge leaves competing pin lists at the root, the app copies the hidden pins into the visible
-  one.
+  one, on load and whenever a merge arrives while the workspace is open. The hidden lists stay in
+  the doc, so each pin copied out of one is noted in the doc's `healed` map (`<list> <pin>`) and
+  is copied only once: unpinning it later sticks, on every device. Two devices that heal before
+  they've synced both copy the same pins (and may each start a `healed` map, which are read
+  together); the later copy of a doubled pin is dropped at the next heal, and pins are read
+  without repeats either way.
 - The header (format version and identities) is authenticated, in passphrase files too.
 - On import, every event must verify, come from a device allowed to change that workspace at the
   time (see [Sharing](SHARING.md#how-it-works)), name this workspace (events carry the id of the
