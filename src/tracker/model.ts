@@ -147,7 +147,9 @@ export const PRIORITIES: { value: Priority; label: string }[] = [
 ];
 
 
-const byOrder = <T extends { order: string }>(a: T, b: T) => (a.order < b.order ? -1 : a.order > b.order ? 1 : 0);
+// Equal order keys appear when offline edits merge; the id settles them the same way on every device.
+const byOrder = <T extends { id: string; order: string }>(a: T, b: T) =>
+  a.order < b.order ? -1 : a.order > b.order ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 // ---- reads ----------------------------------------------------------------------
 
@@ -292,7 +294,7 @@ export class TrackerView {
   }
 
   sortedByNumber(): string[] {
-    return [...this.tasks.entries()].sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
+    return [...this.tasks.entries()].sort(([ia, a], [ib, b]) => a.number - b.number || (ia < ib ? -1 : ia > ib ? 1 : 0)).map(([id]) => id);
   }
 
   /** Done / total for a set of tasks. */
@@ -395,6 +397,36 @@ export function cleanPrefix(raw: string): string {
   return raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || DEFAULT_PREFIX;
 }
 
+/**
+ * Tasks whose key another task already has, with the number each should take
+ * instead. Two devices that each add a task while apart both hand out the
+ * next number, and nothing in the merge notices. Of the tasks sharing a key
+ * the earliest created keeps it (then the smallest id); the rest take the
+ * next free numbers of their prefix, in that same order. It reads nothing but
+ * the doc, so every device works out the same answer for the same doc, and
+ * two devices healing at once write the same numbers.
+ */
+export function keyClashes(doc: TrackerDoc): { id: string; number: number }[] {
+  const fallback = String(doc.prefix || DEFAULT_PREFIX);
+  const series = new Map<string, { id: string; number: number; created: number }[]>();
+  for (const [id, t] of Object.entries(doc.tasks ?? {})) {
+    const prefix = String(t.prefix || fallback);
+    if (!series.has(prefix)) series.set(prefix, []);
+    series.get(prefix)!.push({ id, number: Number(t.number) || 0, created: Number(t.created) || 0 });
+  }
+  const out: { id: string; number: number }[] = [];
+  for (const prefix of [...series.keys()].sort()) {
+    const tasks = series.get(prefix)!.sort((a, b) => a.number - b.number || a.created - b.created || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    let next = tasks[tasks.length - 1].number + 1;
+    let held: number | null = null;
+    for (const t of tasks) {
+      if (t.number === held) out.push({ id: t.id, number: next++ });
+      else held = t.number;
+    }
+  }
+  return out;
+}
+
 /** What a new task starts with. Anything left out uses the project's defaults. */
 export interface NewTask {
   title?: string;
@@ -427,27 +459,40 @@ export class TrackerOps {
 
   // tasks
 
-  async createTask(init: NewTask = {}) {
-    const v = this.view();
+  /**
+   * `projectKey` is the key from the project's task defaults: what the project
+   * itself is keyed with the first time, whatever key this one task asks for.
+   */
+  async createTask(init: NewTask = {}, projectKey?: string) {
     const id = uuidv7();
-    const column = init.column === BACKLOG ? BACKLOG : init.column && v.column(init.column) ? init.column : (v.columns[0]?.id ?? "");
-    const inColumn = v.columnTasks(column);
-    const last = inColumn[inColumn.length - 1];
-    const prefix = cleanPrefix(init.prefix || v.doc.prefix || defaultPrefix(String(v.doc.title)));
-    const number = v.nextNumber(prefix);
-    // A typed phase name that doesn't exist yet becomes a new phase.
-    const named = init.phaseName?.trim();
-    const existingPhase = named ? v.phaseByName(named) : undefined;
-    const newPhaseId = named && !existingPhase ? uuidv7() : undefined;
-    const lastPhase = v.phases[v.phases.length - 1]?.order ?? null;
-    const phase = init.phase ?? existingPhase ?? newPhaseId ?? "";
+    const newPhaseId = uuidv7();
+    // A phase name only counts when no phase was picked outright.
+    const named = init.phase === undefined ? init.phaseName?.trim() : undefined;
 
     await this.change("task.create", id, (d) => {
-      if (!d.prefix) d.prefix = prefix;
       if (!d.tasks) d.tasks = {};
-      if (newPhaseId && named) {
-        if (!d.phases) d.phases = {};
-        d.phases[newPhaseId] = { name: named, order: generateKeyBetween(lastPhase, null) };
+      // The number, the place in the column and the phase all depend on what's
+      // already there, so they're read from the doc being written: a view from
+      // before would hand a task queued behind another the same key.
+      const v = new TrackerView(d);
+      const column = init.column === BACKLOG ? BACKLOG : init.column && v.column(init.column) ? init.column : (v.columns[0]?.id ?? "");
+      const inColumn = v.columnTasks(column);
+      const last = inColumn[inColumn.length - 1];
+      // The project's key comes from its defaults, never from one task's
+      // ("BUG: crash" as the first task doesn't make BUG the project's key).
+      // Older tasks with no key of their own read the project's, so it stays
+      // unset while any exist rather than renaming them.
+      if (!d.prefix && projectKey && !Object.values(d.tasks).some((t) => !t.prefix)) d.prefix = cleanPrefix(projectKey);
+      const prefix = cleanPrefix(init.prefix || String(d.prefix ?? "") || defaultPrefix(String(d.title)));
+      const number = v.nextNumber(prefix);
+      // A typed phase name that doesn't exist yet becomes a new phase.
+      let phase = init.phase ?? "";
+      if (named) {
+        phase = v.phaseByName(named) ?? newPhaseId;
+        if (phase === newPhaseId) {
+          if (!d.phases) d.phases = {};
+          d.phases[newPhaseId] = { name: named, order: generateKeyBetween(v.phases[v.phases.length - 1]?.order ?? null, null) };
+        }
       }
       d.tasks[id] = {
         prefix,
@@ -486,12 +531,26 @@ export class TrackerOps {
     const v = this.view();
     const prefix = cleanPrefix(raw);
     if (!prefix || prefix === v.prefixOf(taskId)) return Promise.resolve();
-    const number = v.nextNumber(prefix);
     return this.change("task.rekey", taskId, (d) => {
       const t = d.tasks[taskId];
       if (!t) return;
+      // Read from the doc being written, like a new task's number.
+      const number = new TrackerView(d).nextNumber(prefix);
       t.prefix = prefix;
       t.number = number;
+    });
+  }
+
+  /**
+   * Give tasks that ended up sharing a key (see keyClashes) numbers of their
+   * own. The same write as a rekey by hand: only the task's number changes,
+   * and nothing else stores a key (links and branches go by task id).
+   */
+  healKeys() {
+    const clashes = keyClashes(this.view().doc);
+    if (!clashes.length) return Promise.resolve();
+    return this.change("task.rekey", clashes.length === 1 ? clashes[0].id : this.id, (d) => {
+      for (const { id, number } of keyClashes(d)) d.tasks[id].number = number;
     });
   }
 

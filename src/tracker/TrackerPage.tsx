@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { WorkspaceSession } from "../lib/session";
 import { useItemLookup } from "../lib/useItemLookup";
-import { BACKLOG, DEFAULT_PREFIX, TrackerOps, TrackerView, cleanPrefix, defaultPrefix, type NewTask, type TrackerDoc } from "./model";
+import { A } from "../lib/automerge";
+import { BACKLOG, DEFAULT_PREFIX, TrackerOps, TrackerView, cleanPrefix, defaultPrefix, keyClashes, type NewTask, type TrackerDoc } from "./model";
 import { TaskDefaultsMenu, templateOf, tokenContext, type TaskDefaults } from "./TaskDefaults";
 import { Gantt } from "./Gantt";
 import { expand } from "./tokens";
@@ -134,6 +135,20 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
     }
   }, [view, ops, onError, canEdit]);
 
+  // Two devices that each added a task while apart gave both the same key.
+  // Whenever the doc arrives or changes with such a pair in it, the later
+  // task is renumbered. Every device picks the same numbers, so it doesn't
+  // matter which gets there first. Tried once per version of the doc, so a
+  // write that fails isn't retried in a loop.
+  const healed = useRef("");
+  useEffect(() => {
+    if (!canEdit || !keyClashes(doc).length) return;
+    const heads = A.getHeads(doc).join();
+    if (healed.current === heads) return;
+    healed.current = heads;
+    ops.healKeys().catch(onError);
+  }, [doc, ops, onError, canEdit]);
+
   // "@me" in the default assignee is whoever is creating the task: saved as
   // their name, never as the literal text (which would read as nobody on
   // every device). With no account name yet, the task starts unassigned.
@@ -170,7 +185,7 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
       due: x.due,
       ...init,
       title: init.title?.trim() ? init.title : x.title,
-    });
+    }, cleanPrefix(hot.prefix));
   };
 
   /** New task: created from the defaults and opened right away. */
@@ -196,7 +211,7 @@ export function TrackerPage({ session, id, initial, task, tab: tabProp, at, head
           column: hot.column || undefined,
           due: x.due,
           title: x.title,
-        });
+        }, cleanPrefix(hot.prefix));
       }
     } catch (e) {
       onError(e);
