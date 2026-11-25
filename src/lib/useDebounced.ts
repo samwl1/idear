@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { registerFlush } from "./pending";
 
 /**
@@ -22,12 +22,17 @@ export function useDebounced<T>(fn: (value: T) => void, ms: number) {
     }
   }, []);
 
-  const schedule = useCallback(
-    (value: T) => {
-      pending.current = { value };
-      if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(flush, ms);
-    },
+  const schedule = useMemo(
+    () =>
+      Object.assign(
+        (value: T) => {
+          pending.current = { value };
+          if (timer.current) clearTimeout(timer.current);
+          timer.current = setTimeout(flush, ms);
+        },
+        // schedule.flush() makes a pending call now, e.g. when a field loses focus.
+        { flush },
+      ),
     [flush, ms],
   );
 

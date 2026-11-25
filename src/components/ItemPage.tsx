@@ -55,7 +55,9 @@ export function ItemPage({ session, id, kind, task, tab, at, onOpen, onError }: 
   const remoteVersion = session.remoteVersion(id);
   useEffect(() => {
     let live = true;
-    session.loadItem(id).then(
+    // Wait for saves first: the editor this one replaces may have just
+    // flushed its last keystrokes, and they belong in what's shown here.
+    session.settled().then(() => session.loadItem(id)).then(
       (d) => live && setDoc(d),
       () => live && setMissing(true),
     );
@@ -181,9 +183,13 @@ export function ItemHeader({
   // A rename or tag change from another device arrives as a new `initial`;
   // follow it unless this device is mid-edit of the same field.
   const editingTitle = useRef(false);
+  // Which reload of the doc the title shown here came from (see NoteBody).
+  const titleBase = useRef(session.remoteVersion(id));
   useEffect(() => {
-    if (!editingTitle.current) setTitle(initial.title);
-  }, [initial.title]);
+    if (editingTitle.current) return;
+    setTitle(initial.title);
+    titleBase.current = session.remoteVersion(id);
+  }, [initial.title, session, id]);
   const tagKey = initial.tags.join("\n");
   useEffect(() => {
     setTags(tagKey ? tagKey.split("\n") : []);
@@ -193,7 +199,7 @@ export function ItemHeader({
   const [isFresh] = useState(() => canEdit && initial.title.startsWith("Untitled") && !(initial as Note).body);
 
   const saveTitle = useDebounced((t: string) => {
-    session.changeItem(id, "rename", (d) => A.updateText(d, ["title"], t)).catch(onError);
+    session.changeItem(id, "rename", (d) => A.updateText(d, ["title"], t), { base: titleBase.current }).catch(onError);
   }, 400);
 
   const addTag = (raw: string) => {
@@ -235,6 +241,16 @@ export function ItemHeader({
         }}
         onBlur={() => {
           editingTitle.current = false;
+          // Save now, then show what the doc holds: a rename from another
+          // device that arrived while this field was being typed in is
+          // merged with what was typed, and neither showed until now.
+          saveTitle.flush();
+          void session.settled().then(() => {
+            const now = session.peekItem(id);
+            if (!now || editingTitle.current) return;
+            setTitle(String(now.title));
+            titleBase.current = session.remoteVersion(id);
+          });
         }}
         value={title}
         readOnly={!canEdit}
@@ -317,6 +333,10 @@ function NoteBody({
   onEditor: (e: Editor | null) => void;
 }) {
   const page = useMemo(() => ({ session, docId: id, pageId: id, onOpen, onError }), [session, id, onOpen, onError]);
+  // Which reload of the note this editor's text came from. If another
+  // device's edit is merged in before this editor is replaced, its last save
+  // is made against the text it had, not written over the merged one.
+  const [base] = useState(() => session.remoteVersion(id));
   return (
     <MarkdownEditor
       initial={initial}
@@ -326,16 +346,21 @@ function NoteBody({
       onEditor={onEditor}
       onChange={(md) =>
         session
-          .changeItem<Note>(id, "edit", (d) => {
-            A.updateText(d, ["body"], md);
-            // Pages linked inline count as references too, so they show up
-            // under References here and under "attached" on the other page.
-            for (const target of pageLinksIn(md)) {
-              if (target === id || !session.node(target)) continue;
-              if (!d.links) d.links = [];
-              if (!d.links.includes(target)) d.links.push(target);
-            }
-          })
+          .changeItem<Note>(
+            id,
+            "edit",
+            (d) => {
+              A.updateText(d, ["body"], md);
+              // Pages linked inline count as references too, so they show up
+              // under References here and under "attached" on the other page.
+              for (const target of pageLinksIn(md)) {
+                if (target === id || !session.node(target)) continue;
+                if (!d.links) d.links = [];
+                if (!d.links.includes(target)) d.links.push(target);
+              }
+            },
+            { base },
+          )
           .catch(onError)
       }
     />

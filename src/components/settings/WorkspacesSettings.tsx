@@ -89,8 +89,10 @@ export function WorkspacesSettings({ workspaces, currentId, onOpen, onCreate, on
       const sub = await src.exportSubtree(null);
       const n = Object.keys(sub.nodes).length;
       const ids = await dst.importSubtree(null, sub, "tree.merge_in");
-      await api.deleteWorkspace(from.id);
+      // Pins go across while the old workspace can still be read: once it's
+      // in the trash its private doc no longer loads.
       await carryPins(src, dst, ids);
+      await api.deleteWorkspace(from.id);
       setMerging(null);
       showToast(`Merged ${n} item${n === 1 ? "" : "s"} from ${from.name} into ${into.name}`);
       onDeleted(from.id);
@@ -360,8 +362,10 @@ function WorkspaceEditor({
 }
 
 /** Choose where a workspace's pages go; the workspace itself goes to the trash after. */
-function MergePicker({ from, targets, onPick, onCancel }: { from: WorkspaceInfo; targets: WorkspaceInfo[]; onPick: (into: WorkspaceInfo) => void; onCancel: () => void }) {
+function MergePicker({ from, targets, onPick, onCancel }: { from: WorkspaceInfo; targets: WorkspaceInfo[]; onPick: (into: WorkspaceInfo) => Promise<void>; onCancel: () => void }) {
   const [into, setInto] = useState<string>(targets[0]?.id ?? "");
+  // A second click while the merge runs would copy everything again.
+  const [busy, setBusy] = useState(false);
   const target = targets.find((t) => t.id === into);
   return (
     <div className="ws-confirm" role="group" aria-label={`Merge ${from.name}`}>
@@ -386,11 +390,20 @@ function MergePicker({ from, targets, onPick, onCancel }: { from: WorkspaceInfo;
         </>
       )}
       <div className="ws-actions">
-        <button className="ghost" onClick={onCancel} autoFocus>
+        <button className="ghost" onClick={onCancel} disabled={busy} autoFocus>
           Cancel
         </button>
         {target && (
-          <button className="primary" onClick={() => onPick(target)}>
+          <button
+            className="primary"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => {
+              if (busy) return;
+              setBusy(true);
+              void onPick(target).finally(() => setBusy(false));
+            }}
+          >
             Merge into {target.name}
           </button>
         )}

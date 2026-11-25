@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { BACKLOG, PRIORITIES, cleanPrefix, type Priority, type TrackerOps, type TrackerView } from "./model";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BACKLOG, PRIORITIES, cleanPrefix, type Priority, type TrackerDoc, type TrackerOps, type TrackerView } from "./model";
+import { A } from "../lib/automerge";
 import { TaskDot, archiveWithUndo, deleteWithUndo, unarchiveWithUndo } from "./bits";
 import { MarkdownEditor } from "../components/MarkdownEditor";
 import { References } from "../components/Links";
@@ -43,7 +44,49 @@ export function TaskDrawer({ session, view, ops, taskId, onOpenItem, onClose, wi
   const [draftTag, setDraftTag] = useState("");
   const run = (p: Promise<unknown>) => p.catch(onError);
 
-  const saveTitle = useDebounced((t: string) => run(ops.setText(taskId, "title", t)), 400);
+  // The title and description are typed here as whole texts, so each
+  // remembers which reload of the project its text came from (`base`). If a
+  // collaborator's edit is merged in while a field is being typed in, the
+  // field's saves are made against the text it had and merged, instead of
+  // writing stale text over the collaborator's.
+  const setText = (field: "title" | "description", value: string, base: number) =>
+    run(
+      session.changeItem<TrackerDoc>(
+        ops.id,
+        "edit",
+        (d) => {
+          if (d.tasks[taskId]) A.updateText(d, ["tasks", taskId, field], value);
+        },
+        { action: "task.edit", subject: taskId, base },
+      ),
+    );
+
+  // A title change from someone else shows here unless this field is being typed in.
+  const editingTitle = useRef(false);
+  const titleBase = useRef(session.remoteVersion(ops.id));
+  useEffect(() => {
+    if (editingTitle.current) return;
+    setTitle(task.title);
+    titleBase.current = session.remoteVersion(ops.id);
+  }, [task.title, session, ops.id]);
+  const saveTitle = useDebounced((t: string) => setText("title", t, titleBase.current), 400);
+
+  // The description editor reads its text once, when it's made, so a change
+  // from someone else remakes it (`n` is part of its key) with the new text.
+  // Not while it's being typed in, though: that waits until focus leaves.
+  const [desc, setDesc] = useState(() => ({ n: 0, text: task.description, base: session.remoteVersion(ops.id) }));
+  // What the doc held when the editor's text last matched it.
+  const descShown = useRef(task.description);
+  const descBox = useRef<HTMLDivElement>(null);
+  const followDescription = useCallback(() => {
+    const now = session.peekItem<TrackerDoc>(ops.id)?.tasks[taskId];
+    if (!now) return;
+    const text = String(now.description ?? "");
+    if (text === descShown.current || descBox.current?.contains(document.activeElement)) return;
+    descShown.current = text;
+    setDesc((d) => ({ n: d.n + 1, text, base: session.remoteVersion(ops.id) }));
+  }, [session, ops.id, taskId]);
+  useEffect(followDescription, [task.description, followDescription]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -115,6 +158,21 @@ export function TaskDrawer({ session, view, ops, taskId, onOpenItem, onClose, wi
           aria-label="Task title"
           readOnly={!canEdit}
           autoFocus={canEdit && !task.title}
+          onFocus={() => {
+            editingTitle.current = true;
+          }}
+          onBlur={() => {
+            editingTitle.current = false;
+            // Save now, then show what the doc holds: it may have merged in
+            // someone else's change to the title while this was being typed.
+            saveTitle.flush();
+            void session.settled().then(() => {
+              const now = session.peekItem<TrackerDoc>(ops.id)?.tasks[taskId];
+              if (!now || editingTitle.current) return;
+              setTitle(String(now.title ?? ""));
+              titleBase.current = session.remoteVersion(ops.id);
+            });
+          }}
           onChange={(e) => {
             setTitle(e.target.value);
             saveTitle(e.target.value);
@@ -299,14 +357,25 @@ export function TaskDrawer({ session, view, ops, taskId, onOpenItem, onClose, wi
 
         <section className="drawer-section">
           <h3>Description</h3>
-          <div className="drawer-desc">
+          <div
+            className="drawer-desc"
+            ref={descBox}
+            onBlur={(e) => {
+              // Focus left the editor (not just moved within it): catch up
+              // with anything that arrived while it was being typed in.
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) void session.settled().then(followDescription);
+            }}
+          >
             <MarkdownEditor
-              key={taskId}
-              initial={task.description}
+              key={`${taskId}:${desc.n}`}
+              initial={desc.text}
               label="Task description"
               page={page}
               className="prose compact"
-              onChange={(md) => run(ops.setText(taskId, "description", md))}
+              onChange={(md) => {
+                descShown.current = md;
+                setText("description", md, desc.base);
+              }}
             />
           </div>
         </section>
