@@ -2,11 +2,17 @@ import { Icon } from "./Icon";
 import type { WorkspaceSession } from "../lib/session";
 import { isPopout, popOut } from "../lib/popout";
 import { showError } from "../lib/toast";
+import { SplitButton } from "./SplitView";
 
-/** Opens the page in its own window. Hidden inside a popped-out window. */
+/**
+ * A page's two ways of seeing more at once: split this window, or open the
+ * page in its own. Both are hidden inside a popped-out window.
+ */
 export function PopOutButton({ session, id }: { session: WorkspaceSession; id: string }) {
   if (isPopout()) return null;
   return (
+    <>
+    <SplitButton />
     <button
       className="tool"
       aria-label="Open in a new window"
@@ -18,5 +24,6 @@ export function PopOutButton({ session, id }: { session: WorkspaceSession; id: s
     >
       <Icon name="popout" />
     </button>
+    </>
   );
 }

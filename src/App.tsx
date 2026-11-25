@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import { api, canEditRole, type WorkspaceInfo } from "./lib/api";
 import { CanEditContext } from "./lib/access";
 import { attachPins, detachPins } from "./lib/pins";
@@ -36,6 +36,8 @@ import { SyncIndicator } from "./components/SyncIndicator";
 import type { ItemKind } from "./lib/session";
 import { rememberLook } from "./lib/looks";
 import { popTarget, windowLabel } from "./lib/popout";
+import { PageTitle, Pane as PaneFrame, SplitDivider, useSplitRatio, type Half } from "./components/SplitView";
+import type { IconName } from "./components/Icon";
 
 /** Set when this window was opened on one page from another window. */
 const POP = popTarget();
@@ -46,6 +48,9 @@ type GlobalPane =
   | { type: "settings"; tab: SettingsTab; doc?: string; anchor?: string | null; workspace?: string };
 /** `at` changes on every open, so reopening the same project still jumps to the task or tab. */
 type Pane = ({ type: "item"; id: string; at: number } & OpenOptions) | ViewsPane | GlobalPane | null;
+/** What either half of a split can show: anything that belongs to the open workspace. */
+type WorkspacePane = Exclude<Pane, GlobalPane>;
+const isGlobal = (p: Pane): p is GlobalPane => p?.type === "settings" || p?.type === "join";
 
 const LAST_WORKSPACE = "lastWorkspace";
 
@@ -57,6 +62,21 @@ export default function App() {
   // A pop-out is one page using the whole window: no sidebar, and nothing it
   // does to the sidebar setting reaches the main window.
   const sidebar = useSidebar(!POP, !!POP);
+  // A second page beside the first. Only a way of looking at things on this
+  // device: null is one pane, `{ pane: null }` is a split whose right half is
+  // empty. Settings and Join take the whole window; the split waits behind them.
+  const [side, setSide] = useState<{ pane: WorkspacePane } | null>(null);
+  const [focusedHalf, setFocusedHalf] = useState<Half>("main");
+  const [ratio, setRatio] = useSplitRatio();
+  const splitShown = !!side && !isGlobal(pane) && !POP;
+  /** The half the sidebar, search, and shortcuts open things in. */
+  const focused: Half = splitShown ? focusedHalf : "main";
+  /** What the sidebar marks as open. */
+  const active: Pane = focused === "side" && side ? side.pane : pane;
+  // The openers below must keep their identity (editors hold on to them), so
+  // they read the layout from here rather than closing over it.
+  const layout = useRef({ pane, side, focused, splitShown });
+  layout.current = { pane, side, focused, splitShown };
   const toast = useToast();
   const [account, setAccountState] = useState<AccountView | null>(null);
   // The private doc (pins) is named after the account, so the session needs to know it.
@@ -72,6 +92,36 @@ export default function App() {
   useEffect(() => {
     if (session) rememberLook(session.id, session.look());
   }, [session]);
+  // The split belongs to the workspace that was open when it was made.
+  const sessionId = session?.id;
+  useEffect(() => {
+    setSide(null);
+    setFocusedHalf("main");
+  }, [sessionId]);
+
+  /** Show `p` in one half (the focused one unless told otherwise). */
+  const show = useCallback((p: WorkspacePane, half?: Half) => {
+    const l = layout.current;
+    const to = half ?? l.focused;
+    if (to === "side" && l.splitShown) setSide({ pane: p });
+    else setPane(p);
+  }, []);
+  const closeHalf = useCallback((half: Half) => {
+    const l = layout.current;
+    // Closing the left half leaves the right one as the whole window.
+    if (half === "main" && l.side) setPane(l.side.pane);
+    setSide(null);
+    setFocusedHalf("main");
+  }, []);
+  const toggleSplit = useCallback(() => {
+    if (POP) return;
+    const l = layout.current;
+    if (l.splitShown) return closeHalf("side");
+    // Coming back from Settings with a split waiting behind it.
+    if (isGlobal(l.pane)) setPane(null);
+    if (!l.side) setSide({ pane: null });
+    setFocusedHalf("side");
+  }, [closeHalf]);
 
   const onError = useCallback((err: unknown) => {
     console.error(err);
@@ -133,10 +183,37 @@ export default function App() {
     }
   };
 
-  const openItem = useCallback(
-    (id: string, opts: OpenOptions = {}) => {
+  const openItemIn = useCallback(
+    (half: Half | null, id: string, opts: OpenOptions = {}) => {
       const kind = session?.node(id)?.kind;
-      if (kind && kind !== "folder") setPane({ type: "item", id, at: Date.now(), ...opts });
+      if (!kind || kind === "folder") return;
+      const l = layout.current;
+      const next: WorkspacePane = { type: "item", id, at: Date.now(), ...opts };
+      let to: Half = l.splitShown ? (half ?? l.focused) : "main";
+      // A page shows in one half at a time (two editors on one page would
+      // overwrite each other), so opening it again goes to where it is.
+      if (l.side?.pane?.type === "item" && l.side.pane.id === id) {
+        to = "side";
+        // Settings was covering the split: step out of it.
+        if (isGlobal(l.pane)) setPane(null);
+      } else if (l.pane?.type === "item" && l.pane.id === id) to = "main";
+      if (to === "side") setSide({ pane: next });
+      else setPane(next);
+      setFocusedHalf(to);
+    },
+    [session],
+  );
+  const openItem = useCallback((id: string, opts?: OpenOptions) => openItemIn(null, id, opts), [openItemIn]);
+  /** Open a page beside whatever is showing, splitting the window if it isn't yet. */
+  const openToSide = useCallback(
+    (id: string) => {
+      const kind = session?.node(id)?.kind;
+      if (POP || !kind || kind === "folder") return;
+      const l = layout.current;
+      // Already on the left: it moves across rather than showing twice.
+      if (isGlobal(l.pane) || (l.pane?.type === "item" && l.pane.id === id)) setPane(null);
+      setSide({ pane: { type: "item", id, at: Date.now() } });
+      setFocusedHalf("side");
     },
     [session],
   );
@@ -145,7 +222,13 @@ export default function App() {
     [],
   );
   const openSettings = useCallback((tab: SettingsTab) => setPane({ type: "settings", tab }), []);
-  const nav = useMemo(() => ({ openItem, openHelp, openSettings }), [openItem, openHelp, openSettings]);
+  const splitNav = useMemo(() => (POP ? undefined : { open: splitShown, toggle: toggleSplit }), [splitShown, toggleSplit]);
+  const nav = useMemo(() => ({ openItem, openHelp, openSettings, split: splitNav }), [openItem, openHelp, openSettings, splitNav]);
+  // Links followed inside a half open in that half.
+  const openInMain = useCallback((id: string, opts?: OpenOptions) => openItemIn("main", id, opts), [openItemIn]);
+  const openInSide = useCallback((id: string, opts?: OpenOptions) => openItemIn("side", id, opts), [openItemIn]);
+  const navMain = useMemo(() => ({ ...nav, openItem: openInMain }), [nav, openInMain]);
+  const navSide = useMemo(() => ({ ...nav, openItem: openInSide }), [nav, openInSide]);
 
   const [palette, setPalette] = useState(false);
 
@@ -155,19 +238,20 @@ export default function App() {
       if (!session) return;
       try {
         const id = await session.createItem(kind, null);
-        setPane({ type: "item", id, at: Date.now() });
+        show({ type: "item", id, at: Date.now() });
       } catch (e) {
         onError(e);
       }
     },
-    [session, onError],
+    [session, onError, show],
   );
 
-  // App-wide keys: search, settings, and text size.
+  // App-wide keys: search, settings, the split, and text size.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       if (e.key === "k" || e.key === "K") setPalette((v) => !v);
+      else if (e.code === "Backslash" && e.shiftKey) toggleSplit();
       else if (e.key === ",") setPane((p) => (p?.type === "settings" ? p : { type: "settings", tab: "workspaces" }));
       else if (e.key === "=" || e.key === "+") zoomStep(1);
       else if (e.key === "-" || e.key === "_") zoomStep(-1);
@@ -177,7 +261,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [toggleSplit]);
 
   /** A workspace left this device (deleted here or on another of your devices). */
   const leaveWorkspace = useCallback(
@@ -298,13 +382,13 @@ export default function App() {
 
   const openPin = useCallback(
     (p: Pin) => {
-      if (p.kind === "hub" || p.kind === "activity") setPane({ type: p.kind });
-      else if (p.kind === "view") setPane({ type: "view", id: p.id });
+      if (p.kind === "hub" || p.kind === "activity") show({ type: p.kind });
+      else if (p.kind === "view") show({ type: "view", id: p.id });
       else if (p.kind === "task") openItem(p.project, { task: p.id });
       else if (session?.node(p.id)?.kind === "folder") window.dispatchEvent(new CustomEvent("reveal-node", { detail: p.id }));
       else openItem(p.id);
     },
-    [openItem, session],
+    [openItem, session, show],
   );
 
   const refreshWorkspaces = useCallback(
@@ -315,7 +399,7 @@ export default function App() {
   const createView = async () => {
     if (!session) return;
     try {
-      setPane({ type: "view", id: await session.createView() });
+      show({ type: "view", id: await session.createView() });
     } catch (e) {
       onError(e);
     }
@@ -390,9 +474,10 @@ export default function App() {
     return null;
   };
 
-  const renderPane = (s: WorkspaceSession, p: Pane) => {
+  const renderPane = (s: WorkspaceSession, p: Pane, half: Half) => {
     const global = renderGlobal(p);
     if (global) return global;
+    const open = half === "side" ? openInSide : openInMain;
     if (p?.type === "item") {
       const node = s.node(p.id);
       if (node && node.kind !== "folder") {
@@ -406,7 +491,7 @@ export default function App() {
             task={p.task}
             tab={p.tab}
             at={p.at}
-            onOpen={openItem}
+            onOpen={open}
             onError={onError}
           />
         );
@@ -420,13 +505,27 @@ export default function App() {
           key={p.id}
           session={s}
           viewId={p.id}
-          onOpen={(id, task) => openItem(id, { task })}
-          onDeleted={() => setPane(null)}
+          onOpen={(id, task) => open(id, { task })}
+          onDeleted={() => show(null, half)}
           onError={onError}
         />
       );
     }
     return <EmptyPane session={s} canEdit={canEdit} onCreate={createAtTop} onSearch={() => setPalette(true)} />;
+  };
+
+  /** What a half's title bar says while the window is split. */
+  const paneLabel = (s: WorkspaceSession, p: Pane): { title: ReactNode; icon: IconName } => {
+    if (p?.type === "item") {
+      const node = s.node(p.id);
+      if (node && node.kind !== "folder") {
+        return { title: <PageTitle session={s} id={p.id} onError={onError} />, icon: node.kind === "tracker" ? "project" : node.kind };
+      }
+    }
+    if (p?.type === "activity") return { title: "Activity", icon: "log" };
+    if (p?.type === "hub") return { title: "Notes Hub", icon: "note" };
+    if (p?.type === "view") return { title: s.view(p.id)?.name || "View", icon: "view" };
+    return { title: "Nothing open", icon: "split" };
   };
 
   return (
@@ -478,23 +577,24 @@ export default function App() {
             <PinnedNav
               key={`pins:${session.id}`}
               session={session}
-              activeKey={paneKey(pane)}
+              activeKey={paneKey(active)}
               onOpen={openPin}
               onError={onError}
             />
             <Tree
               key={session.id}
               session={session}
-              selectedId={pane?.type === "item" ? pane.id : null}
+              selectedId={active?.type === "item" ? active.id : null}
               onOpen={(id) => openItem(id)}
+              onOpenSide={POP ? undefined : openToSide}
               onError={onError}
               onOpenWorkspace={(id, item) => openWorkspace(id, false, item)}
             />
             <ViewsNav
               workspace={session.id}
               views={session.views()}
-              active={pane?.type === "activity" || pane?.type === "hub" || pane?.type === "view" ? pane : null}
-              onSelect={setPane}
+              active={active?.type === "activity" || active?.type === "hub" || active?.type === "view" ? active : null}
+              onSelect={(p) => show(p)}
               onCreate={createView}
             />
             <footer className="rail-foot">
@@ -511,9 +611,40 @@ export default function App() {
           </aside>
 
           {/* Remounts editors when your role changes, so they pick up read-only mode. */}
-          <main className="main" key={canEdit ? "edit" : "view"}>
-            {renderPane(session, pane)}
-          </main>
+          <div
+            className="split"
+            key={canEdit ? "edit" : "view"}
+            data-split={splitShown || undefined}
+            style={{ ["--split" as string]: ratio }}
+          >
+            <PaneFrame
+              half="main"
+              split={splitShown}
+              focused={focused === "main"}
+              {...paneLabel(session, pane)}
+              nav={navMain}
+              onFocus={() => setFocusedHalf("main")}
+              onClose={() => closeHalf("main")}
+            >
+              {renderPane(session, pane, "main")}
+            </PaneFrame>
+            {splitShown && side && (
+              <>
+                <SplitDivider ratio={ratio} onRatio={setRatio} />
+                <PaneFrame
+                  half="side"
+                  split
+                  focused={focused === "side"}
+                  {...paneLabel(session, side.pane)}
+                  nav={navSide}
+                  onFocus={() => setFocusedHalf("side")}
+                  onClose={() => closeHalf("side")}
+                >
+                  {renderPane(session, side.pane, "side")}
+                </PaneFrame>
+              </>
+            )}
+          </div>
           {palette && (
             <CommandPalette
               session={session}
@@ -521,7 +652,8 @@ export default function App() {
               canEdit={canEdit}
               onClose={() => setPalette(false)}
               onOpenItem={openItem}
-              onOpenPane={setPane}
+              onOpenPane={(p) => (p.type === "settings" ? setPane(p) : show(p))}
+              split={POP ? undefined : { open: splitShown, toggle: toggleSplit }}
               onCreate={createAtTop}
               onNewFolder={async () => {
                 try {

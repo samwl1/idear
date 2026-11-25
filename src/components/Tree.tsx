@@ -20,6 +20,8 @@ interface Props {
   onError: (err: unknown) => void;
   /** After a move to another workspace: open that workspace, optionally at the moved page. */
   onOpenWorkspace?: (id: string, item?: string | null) => void;
+  /** Open a page in the other half of the window, splitting it if needed. */
+  onOpenSide?: (id: string) => void;
 }
 
 type DropPos = "before" | "after" | "inside";
@@ -31,7 +33,7 @@ const KIND_ICON: Record<Exclude<TreeNode["kind"], "folder">, IconName> = {
   tracker: "project",
 };
 
-export function Tree({ session, selectedId, onOpen, onError, onOpenWorkspace }: Props) {
+export function Tree({ session, selectedId, onOpen, onError, onOpenWorkspace, onOpenSide }: Props) {
   const canEdit = useCanEdit();
   const menu = useContextMenu();
   const [moving, setMoving] = useState<TreeNode | null>(null);
@@ -162,9 +164,11 @@ export function Tree({ session, selectedId, onOpen, onError, onOpenWorkspace }: 
 
   const rowMenu = (n: TreeNode): MenuItem[] => {
     const isFolder = n.kind === "folder";
-    if (!canEdit) return [];
+    const side: MenuItem[] = !isFolder && onOpenSide ? [{ label: "Open to the side", onSelect: () => onOpenSide(n.id) }] : [];
+    if (!canEdit) return side;
     return [
-      { label: "New page inside", onSelect: () => setAddingTo(n.id) },
+      ...side,
+      { label: "New page inside", onSelect: () => setAddingTo(n.id), separator: side.length > 0 },
       ...(isFolder
         ? [
             { label: "New subfolder", onSelect: () => newFolder(n.id) },
@@ -275,7 +279,12 @@ export function Tree({ session, selectedId, onOpen, onError, onOpenWorkspace }: 
           onDragEnd={endDrag}
           onDragOver={(e) => onRowDragOver(e, n)}
           onDrop={(e) => onRowDrop(e, n)}
-          onClick={() => (n.kind === "folder" ? toggle(n.id) : onOpen(n.id))}
+          onClick={(e) => {
+            if (n.kind === "folder") toggle(n.id);
+            // Cmd/Ctrl-click opens beside what's already showing.
+            else if (onOpenSide && (e.metaKey || e.ctrlKey)) onOpenSide(n.id);
+            else onOpen(n.id);
+          }}
           onToggle={() => toggle(n.id)}
           onRename={(title) => {
             setRenaming(null);
@@ -373,7 +382,7 @@ interface RowProps {
   onDragEnd: () => void;
   onDragOver: (e: DragEvent) => void;
   onDrop: (e: DragEvent) => void;
-  onClick: () => void;
+  onClick: (e: ReactMouseEvent) => void;
   onToggle: () => void;
   onRename: (title: string) => void;
   onStartRename: () => void;

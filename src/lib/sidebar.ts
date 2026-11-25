@@ -53,7 +53,8 @@ export function useSidebar(remember = true, startCollapsed = false) {
   useEffect(() => {
     if (!remember) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "\\" && (e.metaKey || e.ctrlKey)) {
+      // With Shift it splits the window instead (see App).
+      if (e.code === "Backslash" && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
         e.preventDefault();
         setCollapsedState((c) => {
           persist(!c);
