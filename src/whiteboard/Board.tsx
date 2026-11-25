@@ -3,7 +3,7 @@ import { useTheme } from "../lib/prefs";
 import { CaptureUpdateAction, Excalidraw, newElementWith, restoreElements } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { AppState, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
 import { A } from "../lib/automerge";
 import { useItemLookup } from "../lib/useItemLookup";
 import { registerFlush } from "../lib/pending";
@@ -28,7 +28,14 @@ function plain<T>(value: unknown): T {
 /** Point lists are long and only ever replaced whole, so store them as scalars. */
 function toStored(el: Element): unknown {
   if (el.type === "freehand") {
-    return { ...el, strokes: el.strokes.map((s) => ({ ...s, points: new A.ImmutableString(s.points) })) };
+    return {
+      ...el,
+      strokes: el.strokes.map((s) => ({
+        ...s,
+        points: new A.ImmutableString(s.points),
+        ...(s.pressures ? { pressures: new A.ImmutableString(s.pressures) } : {}),
+      })),
+    };
   }
   if (el.type === "arrow") return { ...el, via: new A.ImmutableString(el.via) };
   return el;
@@ -103,7 +110,16 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
   sessionRef.current = session;
 
   useEffect(() => {
-    scene?.forEach((el) => versions.current.set(el.id, el.version));
+    scene?.forEach((el) => {
+      versions.current.set(el.id, el.version);
+      // A stored position the canvas had to replace (two elements sharing
+      // one, from before positions were handed back to it) goes out with the
+      // next save. Otherwise the pair's order would hang on a repair made
+      // again at every load, and could flip once something lands between them.
+      const stored = initial?.[el.id] as { z?: unknown } | undefined;
+      if (canEdit && stored && String(stored.z) !== el.index) dirty.current.add(el.id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene]);
 
   const flush = useCallback(() => {
@@ -123,6 +139,8 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
       const el = fromExcalidraw(ex, byId);
       if (el) puts.push([eid, el]);
     }
+    // An element being saved is never also deleted: deletes run after puts.
+    for (const [eid] of puts) dels.delete(eid);
     dirty.current.clear();
     removed.current.clear();
     if (!puts.length && !dels.size) return;
@@ -141,7 +159,12 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
     };
   }, []);
 
-  const onChange = (elements: readonly ExcalidrawElement[]) => {
+  const onChange = (elements: readonly ExcalidrawElement[], appState: AppState) => {
+    // A font re-measure that was put off while text was being typed.
+    if (remeasureLater.current && !appState.editingTextElement) {
+      remeasureLater.current = false;
+      remeasureRef.current();
+    }
     if (!canEdit) return;
     const unsupported: string[] = [];
     let changed = false;
@@ -160,6 +183,8 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
         dirty.current.delete(el.id);
       } else {
         dirty.current.add(target);
+        // Back from a delete (undo) before the delete was saved: it's no longer removed.
+        if (!el.isDeleted) removed.current.delete(el.id);
       }
     }
     // Images, frames, and embeds have no place in the schema.
@@ -182,19 +207,38 @@ export function Board({ session, id, initial, header, onOpen, onError }: Props) 
   // widths measured with the fallback font, so text runs past its box and is
   // clipped until something re-measures it (editing it does). Re-measure
   // every text element whenever fonts finish loading.
+  const remeasureLater = useRef(false);
+  const remeasureRef = useRef(() => {});
   useEffect(() => {
-    if (!excalidraw) return;
+    if (!excalidraw || !document.fonts) return;
     let live = true;
     const remeasure = () => {
       if (!live) return;
+      // Not while text is being typed: the text box that opens on a click
+      // with the text tool, or on a double click to label a shape, is an
+      // element with no text yet, and restoring one of those deletes it.
+      // onChange runs this again once the typing is done.
+      if (excalidraw.getAppState().editingTextElement) {
+        remeasureLater.current = true;
+        return;
+      }
       const all = excalidraw.getSceneElementsIncludingDeleted();
       if (!all.some((e) => e.type === "text" && !e.isDeleted)) return;
+      const measured = new Map(
+        restoreElements(all, null, { refreshDimensions: true, repairBindings: true }).map((e) => [e.id, e]),
+      );
       excalidraw.updateScene({
-        // Versions are kept, so nothing is saved until the element is next edited.
-        elements: restoreElements(all, null, { refreshDimensions: true, repairBindings: true }),
+        // Only text that came back alive takes its new measurements; everything
+        // else stays as it is. Versions are kept, so nothing is saved until
+        // the element is next edited.
+        elements: all.map((e) => {
+          const m = measured.get(e.id);
+          return m && e.type === "text" && !e.isDeleted && !m.isDeleted ? m : e;
+        }),
         captureUpdate: CaptureUpdateAction.NEVER,
       });
     };
+    remeasureRef.current = remeasure;
     document.fonts.addEventListener("loadingdone", remeasure);
     // Fonts that loaded between building the scene and mounting.
     document.fonts.ready.then(remeasure, () => {});

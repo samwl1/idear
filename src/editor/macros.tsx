@@ -22,7 +22,7 @@ import {
   type Editor,
   type ReactNodeViewProps,
 } from "@tiptap/react";
-import { Plugin, TextSelection } from "@tiptap/pm/state";
+import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import Image from "@tiptap/extension-image";
 import { createLowlight, common } from "lowlight";
@@ -461,16 +461,47 @@ export const Panel = Node.create({
 /** Titles live in a `{title="…"}` attribute, so quotes and braces are left out. */
 const cleanTitle = (t: string) => t.replace(/["{}\n]/g, "").slice(0, 200);
 
-function ExpandView({ node, updateAttributes, editor }: ReactNodeViewProps) {
+function ExpandView({ node, updateAttributes, editor, getPos }: ReactNodeViewProps) {
   // Closed when reading; a new, empty one opens so you can fill it in.
   const [open, setOpen] = useState(() => editor.isEditable && node.textContent === "");
+  // The cursor can get into a closed body without a click: arrow keys, a jump
+  // from the outline, the page link picker. Typing would then change text
+  // nobody can see, so the body shows for as long as the selection has an end in it.
+  const inside = useEditorState({
+    editor,
+    selector: ({ editor: e }) => {
+      const pos = e.isEditable ? getPos() : undefined;
+      const size = pos === undefined ? undefined : e.state.doc.nodeAt(pos)?.nodeSize;
+      if (pos === undefined || size === undefined) return false;
+      const { from, to } = e.state.selection;
+      return (from > pos && from < pos + size) || (to > pos && to < pos + size);
+    },
+  });
+  // Once the cursor has opened it, it stays open after the cursor leaves.
+  useEffect(() => {
+    if (inside) setOpen(true);
+  }, [inside]);
+  const shown = open || inside;
+  const toggle = () => {
+    // Closing with the cursor inside moves it out first, to the nearest text
+    // after the block or else before it. With nowhere to go, it stays open.
+    const pos = getPos();
+    if (shown && inside && pos !== undefined) {
+      const { state, view } = editor;
+      const out =
+        Selection.findFrom(state.doc.resolve(pos + node.nodeSize), 1, true) ??
+        Selection.findFrom(state.doc.resolve(pos), -1, true);
+      if (out) view.dispatch(state.tr.setSelection(out));
+    }
+    setOpen(!shown);
+  };
   const title = String(node.attrs.title ?? "");
   return (
-    <NodeViewWrapper className="expand" data-open={open || undefined}>
+    <NodeViewWrapper className="expand" data-open={shown || undefined}>
       <Grip editor={editor} />
       <div className="expand-head" contentEditable={false}>
-        <button type="button" className="expand-toggle" aria-expanded={open} onClick={() => setOpen(!open)}>
-          <Icon name="chevron" className={open ? "chev open" : "chev"} />
+        <button type="button" className="expand-toggle" aria-expanded={shown} onClick={toggle}>
+          <Icon name="chevron" className={shown ? "chev open" : "chev"} />
         </button>
         {editor.isEditable ? (
           <input
@@ -481,7 +512,7 @@ function ExpandView({ node, updateAttributes, editor }: ReactNodeViewProps) {
             onChange={(e) => updateAttributes({ title: cleanTitle(e.target.value) })}
           />
         ) : (
-          <button type="button" className="expand-title" onClick={() => setOpen(!open)}>
+          <button type="button" className="expand-title" onClick={toggle}>
             {title || "Click to expand"}
           </button>
         )}
