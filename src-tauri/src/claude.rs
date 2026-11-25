@@ -132,20 +132,20 @@ fn status(state: &AppState) -> CmdResult<ClaudeStatus> {
             let name = ws.name()?;
             let m = ws.ensure_members(&own)?;
             let role = claude.as_ref().and_then(|c| m.role(&c.user)).filter(|r| r.has_access());
+            // An open invite in the inbox, or picked up but not yet redeemed.
+            // Its role comes from the invite itself: the letter is gone as
+            // soon as Claude's connection has read it.
             let letter = inbox::get(&dir, &w.id);
-            // An invite in the inbox, or picked up but not yet redeemed.
-            let invited = letter.as_ref().is_some_and(|l| m.invites_view(now()).iter().any(|i| i.id == l.invite && i.status == "open"))
-                || m.invites.keys().any(|i| waiting_joins.contains(i));
+            let waiting = inbox::waiting_role(m, letter.as_ref(), &waiting_joins, now());
             Ok(ClaudeWorkspace {
                 id: w.id.clone(),
                 name,
                 can_manage: m.role(&own.user) == Some(Role::Owner),
-                access: match role {
-                    Some(r) => r.as_str().to_string(),
-                    None if invited => letter_role(&dir, &w.id, m).unwrap_or_else(|| "viewer".into()),
-                    None => "none".into(),
+                access: match (role, waiting) {
+                    (Some(r), _) | (None, Some(r)) => r.as_str().to_string(),
+                    (None, None) => "none".into(),
                 },
-                waiting: role.is_none() && invited,
+                waiting: role.is_none() && waiting.is_some(),
             })
         })?;
         workspaces.push(item);
@@ -160,12 +160,6 @@ fn status(state: &AppState) -> CmdResult<ClaudeStatus> {
         command: cmd,
         workspaces,
     })
-}
-
-/// The role on the invite waiting in Claude's inbox.
-fn letter_role(dir: &std::path::Path, ws: &str, m: &notes_core::members::Members) -> Option<String> {
-    let l = inbox::get(dir, ws)?;
-    m.invites_view(now()).into_iter().find(|i| i.id == l.invite).map(|i| i.role.as_str().to_string())
 }
 
 fn now() -> i64 {
@@ -205,26 +199,40 @@ pub async fn claude_set_access(state: State<'_, AppState>, workspace_id: String,
     if let Some(user) = member {
         set_role(&state, &workspace_id, &user, role.unwrap_or(Role::Removed))?;
         if role.is_none() {
-            cancel_letter(&state, &dir, &workspace_id);
+            cancel_invites(&state, &dir, &workspace_id)?;
         }
         return status(&state);
     }
 
     // New to Claude: replace any invite still waiting with one for this role.
-    cancel_letter(&state, &dir, &workspace_id);
+    cancel_invites(&state, &dir, &workspace_id)?;
     if let Some(role) = role {
         // Your own Claude needs no approval or passphrase: you're handing it the link yourself.
-        let (token, invite, _) = make_invite(&state, &workspace_id, role, "Claude", 30 * 24, false, None)?;
+        let (token, invite, _) = make_invite(&state, &workspace_id, role, inbox::CLAUDE_LABEL, 30 * 24, false, None)?;
         inbox::put(&dir, &workspace_id, &Letter { token, invite })?;
     }
     status(&state)
 }
 
-fn cancel_letter(state: &AppState, dir: &std::path::Path, workspace: &str) {
-    if let Some(l) = inbox::get(dir, workspace) {
-        let _ = end_invite(state, workspace, &l.invite);
-        inbox::remove(dir, workspace);
+/// Take back every invite still open for Claude in a workspace: the one in
+/// its inbox, and any its connection already picked up (which deletes the
+/// letter) but hasn't redeemed. Without the second, access given and then
+/// taken away would still arrive the next time Claude connected.
+fn cancel_invites(state: &AppState, dir: &std::path::Path, workspace: &str) -> CmdResult<()> {
+    let own = own_identity(state)?;
+    let letter = inbox::get(dir, workspace);
+    // Out of the inbox first, so it can't be picked up while this runs.
+    inbox::remove(dir, workspace);
+    let picked_up: Vec<String> =
+        notes_peer::sync::Joins::load(dir.join("joins.json")).list().into_iter().map(|j| j.invite_id).collect();
+    let open = with_ws(state, workspace, |ws, _| {
+        let m = ws.ensure_members(&own)?;
+        Ok(inbox::claude_invites(m, letter.as_ref(), &picked_up, now()))
+    })?;
+    for invite in open {
+        end_invite(state, workspace, &invite.id)?;
     }
+    Ok(())
 }
 
 /// Add (or update) idear in Claude Desktop's config. Keeps a backup.

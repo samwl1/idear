@@ -217,6 +217,126 @@ async fn deleting_a_workspace_reaches_your_other_devices() {
     assert_eq!(ca.merge_removals(&evil.into_iter().collect()).unwrap(), (vec![], vec![]));
 }
 
+/// Deleting takes the removals file and then the open workspaces. Applying
+/// a sync that brings in a new workspace needs both too, and must not sit
+/// on the open workspaces while it waits for the file, or the two deadlock.
+#[test]
+fn applying_never_waits_for_the_removals_file_holding_workspaces() {
+    let (user, a, b) = (key(1), key(2), key(3));
+    let mut ids = IdentityState::new(&user.verifying_key());
+    ids.certs.insert(key_id(&a.verifying_key()), DeviceCert::issue(&user, &a.verifying_key(), "A").unwrap());
+    ids.certs.insert(key_id(&b.verifying_key()), DeviceCert::issue(&user, &b.verifying_key(), "B").unwrap());
+    let (ra, rb) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (ca, cb) = (ctx(ra.path(), &user, &a, &ids), ctx(rb.path(), &user, &b, &ids));
+    Workspace::create(&ca.root, "wa", &manifest("From A").save(), &a).unwrap();
+    let (bundle, _) = ca.export_bundle(&["wa".to_string()], None).unwrap();
+
+    // A delete is under way on B: it has the file and wants the workspaces next.
+    let file = crate::removals::hold_file();
+    let importer = {
+        let cb = cb.clone();
+        std::thread::spawn(move || cb.import_bundle(bundle).map(|r| r.applied.new_workspaces))
+    };
+    // Wait for the import to get as far as needing the file.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !cb.root.join("wa").join("events.db").exists() {
+        assert!(std::time::Instant::now() < deadline, "the import never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut free = false;
+    for _ in 0..200 {
+        if cb.open.try_lock().is_ok() {
+            free = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(free, "apply held the open workspaces while waiting for the removals file");
+    drop(file);
+    assert!(importer.join().unwrap().unwrap());
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+/// A data folder put back from an older copy, with the device key (in the
+/// keychain) unchanged. Its log is short of events other devices hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rolled_back_data_folder() {
+    let (user, a, b) = (key(1), key(2), key(3));
+    let mut ids = IdentityState::new(&user.verifying_key());
+    ids.certs.insert(key_id(&a.verifying_key()), DeviceCert::issue(&user, &a.verifying_key(), "A").unwrap());
+    ids.certs.insert(key_id(&b.verifying_key()), DeviceCert::issue(&user, &b.verifying_key(), "B").unwrap());
+    let (ra, rb, backup) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (ca, cb) = (ctx(ra.path(), &user, &a, &ids), ctx(rb.path(), &user, &b, &ids));
+    let (ep_a, ep_b) = (endpoint(&a).await, endpoint(&b).await);
+    let me = key_id(&a.verifying_key());
+    let seq_of = |c: &SyncCtx| {
+        c.open.lock().unwrap().clear();
+        Workspace::open(&c.root, "w").unwrap().summary(true).unwrap().seqs[&me]
+    };
+    let restore = || {
+        ca.open.lock().unwrap().clear();
+        std::fs::remove_dir_all(ca.root.join("w")).unwrap();
+        copy_dir(&backup.path().join("w"), &ca.root.join("w"));
+    };
+    let forked = |applied: &Applied| applied.problems.iter().any(|p| p.contains("rolled back"));
+
+    Workspace::create(&ca.root, "w", &manifest("W").save(), &a).unwrap();
+    rename(&ca, "w", "one");
+    copy_dir(&ca.root.join("w"), &backup.path().join("w"));
+    rename(&ca, "w", "two");
+    rename(&ca, "w", "three");
+    sync(&ca, &ep_a, &cb, &ep_b).await.unwrap();
+    assert_eq!((name_of(&cb, "w"), seq_of(&cb)), ("three".to_string(), 4));
+
+    // Restored, and synced before anything was changed: the events this
+    // device signed come back from the other one, so the next edit carries
+    // on after them and is accepted everywhere.
+    restore();
+    assert_eq!((name_of(&ca, "w"), seq_of(&ca)), ("one".to_string(), 2));
+    let (got_a, got_b) = sync(&ca, &ep_a, &cb, &ep_b).await.unwrap();
+    assert!(got_a.problems.is_empty() && got_b.problems.is_empty(), "{got_a:?} {got_b:?}");
+    assert_eq!((name_of(&ca, "w"), seq_of(&ca)), ("three".to_string(), 4));
+    rename(&ca, "w", "four");
+    let (got_a, got_b) = sync(&ca, &ep_a, &cb, &ep_b).await.unwrap();
+    assert!(got_a.problems.is_empty() && got_b.problems.is_empty(), "{got_a:?} {got_b:?}");
+    assert_eq!((name_of(&cb, "w"), seq_of(&cb)), ("four".to_string(), 5));
+
+    // Restored and edited before syncing: event #3 now exists twice under
+    // one key. The other device keeps the one it had and refuses the rest;
+    // this device is told what happened instead of failing silently.
+    restore();
+    rename(&ca, "w", "forked");
+    let (got_a, _) = sync(&ca, &ep_a, &cb, &ep_b).await.unwrap();
+    assert!(forked(&got_a), "{got_a:?}");
+    assert_eq!(got_a.problems.iter().filter(|p| p.contains("rolled back")).count(), 1, "said once: {got_a:?}");
+    assert_eq!(name_of(&cb, "w"), "four");
+
+    // Still said once this device has as many events as the other holds
+    // for it, when nothing is offered back any more.
+    for to in ["five", "six", "seven"] {
+        rename(&ca, "w", to);
+    }
+    assert!(seq_of(&ca) > seq_of(&cb));
+    let (got_a, _) = sync(&ca, &ep_a, &cb, &ep_b).await.unwrap();
+    assert!(forked(&got_a), "{got_a:?}");
+    assert_eq!(name_of(&cb, "w"), "four");
+    // The other device, which did nothing wrong, isn't told it was rolled back.
+    let (got_b, _) = sync(&cb, &ep_b, &ca, &ep_a).await.unwrap();
+    assert!(!forked(&got_b), "{got_b:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sharing_with_other_people() {
     let (sam_key, sam_dev, sam) = person(1, 11, "Sam");
