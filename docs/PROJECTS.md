@@ -213,8 +213,10 @@ The Roadmap tab draws every dated task on a timeline.
   either edge to change its start or end. Drag a phase's bar to move every dated task in it
   together (its start and end move too), or drag its edges to change its planned window.
 - **Phase bounds.** A task in a phase with a planned window stays inside it: dates typed in the
-  task panel, dropped on the chart, or dragged are held within the phase, and shrinking a phase
-  pulls its tasks in.
+  task panel, dropped on the chart, or dragged are held within the phase. Changing a phase's dates
+  leaves tasks that still fit alone. If the new window would leave any task outside, all of the
+  phase's tasks slide together by the fewest days that bring them back in, so they keep their
+  spacing. Only a window too short for the whole schedule trims task dates to fit.
 - **Days**, **Weeks**, and **Months** change the scale; a frame shorter than the window stretches
   to fill it. **Today** scrolls back to the red line. **Key** and **Priority** narrow the chart.
 - The **time frame** starts one unit before the earliest task and ends one unit after the latest.

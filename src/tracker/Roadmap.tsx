@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import type { NewTask, TrackerOps, TrackerView } from "./model";
+import { isPlanDate, type NewTask, type TrackerOps, type TrackerView } from "./model";
 import { archiveWithUndo, ChecklistCount, ConfirmDelete, DueDate, EditableText, InlineAdd, TaskDot, taskMenuItems, unarchiveWithUndo } from "./bits";
 import { useContextMenu } from "../components/ContextMenu";
 import { Icon } from "../components/Icon";
@@ -187,28 +187,26 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
           </span>
           {phase && (
             <span className="phase-dates">
-              <input
-                type="date"
-                className="field phase-date"
-                aria-label="Phase start"
+              <PhaseDate
+                label="Phase start"
                 title="Planned start"
                 value={phase.start ?? ""}
                 max={phase.end || undefined}
                 disabled={!canEdit}
-                onChange={(e) => run(ops.setPhaseDates(phase.id, { start: e.target.value }))}
+                onCommit={(start) => ops.setPhaseDates(phase.id, { start })}
+                onError={onError}
               />
               <span className="muted small" aria-hidden="true">
                 to
               </span>
-              <input
-                type="date"
-                className="field phase-date"
-                aria-label="Phase end"
+              <PhaseDate
+                label="Phase end"
                 title="Planned end"
                 value={phase.end ?? ""}
                 min={phase.start || undefined}
                 disabled={!canEdit}
-                onChange={(e) => run(ops.setPhaseDates(phase.id, { end: e.target.value }))}
+                onCommit={(end) => ops.setPhaseDates(phase.id, { end })}
+                onError={onError}
               />
             </span>
           )}
@@ -280,6 +278,71 @@ export function Roadmap({ session, view, ops, create, nextName, openTask, onOpen
       {section(null, -1)}
       {ctx.menu}
     </div>
+  );
+}
+
+/**
+ * One end of a phase's planned window. A date field fires a change for every
+ * keystroke, half-typed years included ("0002-05-01"), so what's typed is held
+ * here and only saved on blur or Enter, once it's a whole date that fits.
+ * Anything else is put back as it was, with the reason.
+ */
+export function PhaseDate({
+  label,
+  title,
+  value,
+  min,
+  max,
+  disabled,
+  onCommit,
+  onError,
+}: {
+  label: string;
+  title?: string;
+  value: string;
+  min?: string;
+  max?: string;
+  disabled?: boolean;
+  onCommit: (value: string) => Promise<unknown>;
+  onError: (err: unknown) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+
+  const commit = (el: HTMLInputElement) => {
+    // A half-filled field reads as empty: that's not a request to clear the date.
+    if (el.validity.badInput) return setDraft(value);
+    if (draft === value) return;
+    const refuse = (why: string) => {
+      setDraft(value);
+      onError(new Error(why));
+    };
+    if (draft && !isPlanDate(draft)) return refuse("That date isn't one a phase can use.");
+    if (draft && min && draft < min) return refuse("A phase can't end before it starts.");
+    if (draft && max && draft > max) return refuse("A phase can't start after it ends.");
+    onCommit(draft).catch((err) => {
+      setDraft(value);
+      onError(err);
+    });
+  };
+
+  return (
+    <input
+      type="date"
+      className="field phase-date"
+      aria-label={label}
+      title={title}
+      value={draft}
+      min={min}
+      max={max}
+      disabled={disabled}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={(e) => commit(e.currentTarget)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit(e.currentTarget);
+        else if (e.key === "Escape") setDraft(value);
+      }}
+    />
   );
 }
 

@@ -55,6 +55,12 @@ export interface Expanded {
 /** `{a,b,c}` or `{name=a,b,c}` or a reference `{name}` to a list named earlier. */
 const LIST = /\{(?:([A-Za-z_][\w-]*)=)?([^{}]*,[^{}]*)\}/g;
 
+/**
+ * A date with a format, `{date:ddd D MMM, YYYY}` or `{date+7:MMM D, YYYY}`.
+ * Its commas are punctuation in the format, not a list of tasks to make.
+ */
+const DATED = /^\{\s*date(?:[+-]\d+)?:/;
+
 interface Lists {
   /** Variable name → values. Anonymous lists are keyed by their exact text. */
   vars: Map<string, string[]>;
@@ -64,6 +70,7 @@ function collectLists(strings: string[]): Lists {
   const vars = new Map<string, string[]>();
   for (const s of strings) {
     for (const m of s.matchAll(LIST)) {
+      if (DATED.test(m[0])) continue;
       const name = m[1] ?? m[0];
       const values = m[2].split(",").map((v) => v.trim()).filter(Boolean);
       if (values.length && !vars.has(name)) vars.set(name, values);
@@ -320,7 +327,7 @@ interface Per {
 /** Everything except counters and (n) suffixes. */
 function fillTokens(s: string, ctx: TokenContext, per: Per, phaseName: string): string {
   const today = ctx.today ?? new Date();
-  let out = s.replace(LIST, (m, name: string | undefined) => per.vars[name ?? m] ?? "");
+  let out = s.replace(LIST, (m, name: string | undefined) => (DATED.test(m) ? m : (per.vars[name ?? m] ?? "")));
   out = out.replace(/\{([^{}]*)\}/g, (whole, inner: string) => {
     const body = inner.trim();
     const v = per.vars[body];
