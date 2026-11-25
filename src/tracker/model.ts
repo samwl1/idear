@@ -347,6 +347,35 @@ function boundToPhase(d: TrackerDoc, taskId: string) {
   if (t.start && t.due && t.due < t.start) t.due = t.start;
 }
 
+const addDays = (iso: string, days: number): string => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+const daysBetween = (from: string, to: string): number =>
+  Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
+
+/**
+ * How far a phase's tasks must slide, all together, to sit inside a window
+ * that has moved: 0 when they already fit, otherwise the fewest days that
+ * bring the schedule back in, with every task keeping its place relative to
+ * the others. When the tasks span more than the window they line up with
+ * its start; `fits` is then false and the overhang has to be trimmed.
+ */
+export function slideIntoWindow(dates: string[], lo: string, hi: string): { days: number; fits: boolean } {
+  const all = dates.filter(Boolean).sort();
+  if (!all.length) return { days: 0, fits: true };
+  const first = all[0];
+  const last = all[all.length - 1];
+  const early = lo && first < lo ? daysBetween(first, lo) : 0;
+  const late = hi && last > hi ? daysBetween(hi, last) : 0;
+  if (!early && !late) return { days: 0, fits: true };
+  const span = daysBetween(first, last);
+  const room = lo && hi ? daysBetween(lo, hi) : Infinity;
+  if (span > room) return { days: daysBetween(first, lo), fits: false };
+  return { days: early ? early : -late, fits: true };
+}
+
 /**
  * A whole YYYY-MM-DD date in a year a plan could mean. A date field reports a
  * half-typed year as a real date ("0002-05-01"), which must never be saved.
@@ -870,9 +899,11 @@ export class TrackerOps {
 
   /**
    * Set a phase's planned window. Only whole, believable dates get in, and an
-   * end before the start is refused rather than swapped. Tasks keep their own
-   * dates: moving the window never rewrites them (a task is only pulled into
-   * the window when its own dates or phase are next edited).
+   * end before the start is refused rather than swapped. Tasks that still
+   * fall inside the window keep their dates. If the window moves past any of
+   * them, the phase's whole schedule slides by the fewest days that bring it
+   * back inside, so the tasks keep their spacing; only when the window is too
+   * short to hold the schedule are the overhanging dates trimmed to it.
    */
   setPhaseDates(phaseId: string, patch: { start?: string; end?: string }) {
     for (const v of [patch.start, patch.end]) {
@@ -892,6 +923,15 @@ export class TrackerOps {
       if (s && e && e < s) return;
       if (patch.start !== undefined && p.start !== patch.start) p.start = patch.start;
       if (patch.end !== undefined && p.end !== patch.end) p.end = patch.end;
+      const ids = Object.keys(d.tasks ?? {}).filter((id) => d.tasks[id].phase === phaseId);
+      const { days, fits } = slideIntoWindow(ids.flatMap((id) => [d.tasks[id].start ?? "", d.tasks[id].due]), s, e);
+      if (!days && fits) return;
+      for (const id of ids) {
+        const t = d.tasks[id];
+        if (days && t.start) t.start = addDays(t.start, days);
+        if (days && t.due) t.due = addDays(t.due, days);
+        if (!fits) boundToPhase(d, id);
+      }
     });
   }
 
