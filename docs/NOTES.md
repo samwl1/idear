@@ -26,6 +26,17 @@ as a PDF** (notes; the system print dialog does both, with only the note on the 
 **pop out** the page into its own window. A popped-out window shows just that page, with no sidebar:
 the window is the page. Edits made in any window show up in the others.
 
+**Split the window** to see two pages side by side, which also works in full screen. Right-click
+a page in the sidebar and choose **Open to the side**, or Cmd-click it (Ctrl-click on Linux); the
+split button by a page's title, or Cmd+Shift+\ (Ctrl+Shift+\), opens an empty second pane to
+fill. Each pane has a title bar: the one with the coloured line is the pane the sidebar, pins, and
+search open things in, and clicking in a pane picks it. Links followed inside a pane open in that
+pane. Drag the bar between the panes to resize them (double-click to even them out), and close
+either pane with its ×. A page shows in one pane at a time: opening it again takes you to the
+pane it's in. The split is only how this window looks. Nothing about it is saved in the workspace
+or synced, and it resets when you switch workspaces or restart; only the divider's position is
+remembered on this device.
+
 Pins follow your account: a pin made on one of your devices shows on the others, and never on
 the devices of people you share with. Right-click a pin to keep it **on this device only**
 instead; those show a small mark.

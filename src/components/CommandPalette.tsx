@@ -30,6 +30,8 @@ interface Props {
   onNewFolder: () => void;
   onSwitchWorkspace: (id: string) => void;
   onToggleSidebar: () => void;
+  /** The two-pane view, where the window can have one. */
+  split?: { open: boolean; toggle: () => void };
   onError: (err: unknown) => void;
 }
 
@@ -85,6 +87,7 @@ export function CommandPalette(p: Props) {
       { title: "Notes Hub", detail: "Every note in a grid", icon: "note", run: () => p.onOpenPane({ type: "hub" }) },
       { title: "Activity", detail: "Who changed what", icon: "log", run: () => p.onOpenPane({ type: "activity" }) },
       { title: "Toggle sidebar", detail: `${MOD}\\`, icon: "sidebar", run: p.onToggleSidebar },
+      { title: p.split?.open ? "Close the split" : "Split the window", detail: `${MOD}${MOD === "⌘" ? "⇧" : "Shift+"}\\`, icon: "split", run: () => p.split?.toggle(), when: !!p.split },
       { title: "Settings", detail: `${MOD},`, icon: "gear", run: () => p.onOpenPane({ type: "settings", tab: "workspaces" }) },
       { title: "Devices and sync", detail: "Settings", icon: "bolt", run: () => p.onOpenPane({ type: "settings", tab: "devices" }) },
       { title: "Appearance", detail: "Settings", icon: "eye", run: () => p.onOpenPane({ type: "settings", tab: "appearance" }) },

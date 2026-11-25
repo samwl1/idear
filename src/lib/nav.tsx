@@ -15,6 +15,8 @@ export interface Nav {
   openHelp: (doc: string, anchor?: string | null) => void;
   /** Open a Settings tab ("claude", "devices", ...). */
   openSettings: (tab: SettingsTab) => void;
+  /** The two-pane view, where the window can have one (not in pop-outs). */
+  split?: { open: boolean; toggle: () => void };
 }
 
 export const NavContext = createContext<Nav>({ openItem: () => {}, openHelp: () => {}, openSettings: () => {} });
